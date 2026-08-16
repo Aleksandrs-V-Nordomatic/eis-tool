@@ -1,0 +1,9 @@
+# One EIS procurement URL, id or IUB notice uuid per line. Committing this file starts a run.
+#
+# This exists because handing the tool a specific list is its main job, and not every
+# caller may dispatch a workflow — writing a file is a permission a scheduled agent can
+# plausibly hold when `actions: write` is not on offer.
+#
+# Lines beginning with # are ignored, so say why you asked for these. Leave the list empty
+# when there is nothing to ask for: a committed list of ids is a statement about what
+# somebody is interested in, and this file is public.
