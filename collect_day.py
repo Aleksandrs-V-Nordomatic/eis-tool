@@ -4,9 +4,15 @@
 
     python3 collect_day.py --date 2026-08-11 --shards 4 --slices 4 --run-id 31478237531
 
-DELIVERY SHAPE. `day.json` stays beside `shards/` and `shards.zip`. The ZIP mirrors the
-folder: four shard folders, tender ZIPs and their small index sidecars, then the shard-level
-accounting files. A consumer may take the whole day or one tender without listing documents.
+DELIVERY SHAPE. `day.json` stays beside `shards/` and `shards.zip`. Each shard folder holds
+every tender twice — as `<pid>/`, which can be opened one document at a time, and as
+`<pid>.zip`, which is one request for the whole tender — plus the small index sidecars and
+the shard-level accounting files.
+
+`shards.zip` carries the archives and the sidecars, NOT a second copy of the unpacked
+folders: a reader taking the whole day wants it once, and mirroring the folders as well
+would roughly double a file that is already tens of megabytes. So the folders are for
+looking, the ZIP is for taking, and neither is a subset of the other by accident.
 
 WHY THIS EXISTS. A reader that lists folders to find its work reads the wrong day. Delivery
 overwrites files and never removes folders, so a date fetched twice holds tenders from both
@@ -152,6 +158,10 @@ def collect(drive, base, date, shards, slices, run_id, tok):
                 "title": entry.get("title"),
                 "shard": n,
                 "path": "%s/shards/eis-batch-shard-%d/%s" % (date, n, archive_name),
+                # The same tender unpacked, for a reader that wants one document rather
+                # than the whole thing. Named here so nobody has to guess it exists.
+                "folder_path": "%s/shards/eis-batch-shard-%d/%s"
+                               % (date, n, entry.get("folder") or pid),
                 "uri": archive_uri,
                 "archive_uri": archive_uri,
                 "index_uri": uri(drive, index_item),

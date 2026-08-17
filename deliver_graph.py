@@ -182,18 +182,34 @@ def zip_write(zf, name, data):
     zf.writestr(info, data)
 
 
-def tender_archive(pack_files, pid, structures, entry_bytes):
-    """The former tender folder as one ZIP; `index.json` is deliberately last."""
+def tender_members(pack_files, pid, structures, entry_bytes):
+    """Everything one tender publishes, in the order it is published.
+
+    ONE LIST, TWO RENDERINGS. A tender is delivered twice — as a folder somebody can open
+    without downloading anything, and as one archive somebody can take whole. Both are
+    built from this, so a file that reaches one always reaches the other; two independent
+    assemblies would drift the first time either changed, and the drift would be invisible
+    until a reader compared them.
+
+    `index.json` is last on purpose, in the folder for the same reason as in the ZIP: it is
+    written after every file it names, so its presence is the proof the rest arrived.
+    """
+    members = sorted(pack_files)
+    if structures:
+        members.append(("structure.json",
+                        json.dumps({"schema": "structure/1", "pid": pid,
+                                    "documents": structures},
+                                   ensure_ascii=False).encode("utf-8")))
+    members.append(("index.json", entry_bytes))
+    return members
+
+
+def tender_archive(members):
+    """The tender as one ZIP — one request however many documents it holds."""
     out = io.BytesIO()
     with zipfile.ZipFile(out, "w", allowZip64=True) as zf:
-        for rel, data in sorted(pack_files):
+        for rel, data in members:
             zip_write(zf, rel, data)
-        if structures:
-            sidecar = json.dumps({"schema": "structure/1", "pid": pid,
-                                  "documents": structures},
-                                 ensure_ascii=False).encode("utf-8")
-            zip_write(zf, "structure.json", sidecar)
-        zip_write(zf, "index.json", entry_bytes)
     return out.getvalue()
 
 
@@ -383,6 +399,9 @@ def main(argv=None):
         index_name = "%s.index.json" % pid
         entry["archive"] = archive_name
         entry["index_file"] = index_name
+        # The same tender, unpacked. Named so a reader can choose without guessing that a
+        # folder exists beside the archive.
+        entry["folder"] = pid
 
         # THE SAME LINE AGAIN, ONE TENDER WIDE, INSIDE THE TENDER — because of who reads it.
         # A reader that judges tender by tender opens one tender at a time, and making it
@@ -394,13 +413,28 @@ def main(argv=None):
         # an index that exists was written after every document it names.
         entry_bytes = json.dumps(dict(entry, date=args.date, shard=args.shard),
                                  ensure_ascii=False).encode("utf-8")
-        archive_bytes = tender_archive(pack_files, pid, structures, entry_bytes)
+        contents = tender_members(pack_files, pid, structures, entry_bytes)
+
+        # THE ARCHIVE FIRST, THE FOLDER AFTER, AND BOTH FROM `contents`.
+        #
+        # The archive is one request whatever the tender weighs; the folder is one request
+        # per file, and a day runs about forty documents per tender — so the folder is the
+        # expensive half by roughly that factor, against a Graph endpoint that already
+        # answers 429 under load. It is delivered anyway because the two serve different
+        # readers: the archive is for taking a tender whole, the folder is for opening one
+        # document without downloading the rest. `upload` retries and backs off, so the
+        # cost is time, not loss.
+        archive_bytes = tender_archive(contents)
         upload(drive, "%s/%s" % (root, archive_name), archive_bytes, tok)
         upload(drive, "%s/%s" % (root, index_name), entry_bytes, tok)
         files += 2
-        members += len(pack_files) + 1 + (1 if structures else 0)
         bytes_sent += len(archive_bytes) + len(entry_bytes)
 
+        for rel, data in contents:
+            upload(drive, "%s/%s/%s" % (root, pid, rel), data, tok)
+            files += 1
+            bytes_sent += len(data)
+        members += len(contents)
 
         index["tenders"].append(entry)
 

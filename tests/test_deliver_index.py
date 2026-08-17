@@ -250,6 +250,39 @@ class DeliveredIndex(unittest.TestCase):
 
         self.assertEqual(paths[-1], "%s/index.json" % base)
 
+    def test_each_tender_is_delivered_as_a_folder_as_well_as_an_archive(self):
+        # A reader that wants one document should not have to take the whole tender to get
+        # it, and a reader that wants the tender whole should not have to walk a folder.
+        # Both are published, so neither has to.
+        paths = self.deliver()
+        base = "dest/2026-08-11/shards/eis-batch-shard-1"
+        for pid in ("111", "222"):
+            in_folder = [p for p in paths if p.startswith("%s/%s/" % (base, pid))]
+            self.assertTrue(in_folder, "no folder delivered for %s" % pid)
+            self.assertIn("%s/%s/index.json" % (base, pid), in_folder)
+
+    def test_the_folder_and_the_archive_hold_exactly_the_same_members(self):
+        # They are two renderings of one list. If they ever diverge, a reader comparing the
+        # folder against the archive finds a file in one and not the other, with nothing
+        # saying which is right — so this is the property worth pinning, not the contents.
+        paths = self.deliver()
+        base = "dest/2026-08-11/shards/eis-batch-shard-1"
+        for pid in ("111", "222"):
+            prefix = "%s/%s/" % (base, pid)
+            folder = {p[len(prefix):]: b for p, b in self.sent if p.startswith(prefix)}
+            archived = archive_entries(dict(self.sent)["%s/%s.zip" % (base, pid)])
+            self.assertEqual(sorted(folder), sorted(archived))
+            for name in folder:
+                self.assertEqual(folder[name], archived[name], name)
+
+    def test_the_folders_index_is_written_after_the_files_it_names(self):
+        paths = self.deliver()
+        base = "dest/2026-08-11/shards/eis-batch-shard-1"
+        for pid in ("111", "222"):
+            prefix = "%s/%s/" % (base, pid)
+            in_folder = [p for p in paths if p.startswith(prefix)]
+            self.assertEqual(in_folder[-1], prefix + "index.json")
+
 
 if __name__ == "__main__":
     unittest.main()
