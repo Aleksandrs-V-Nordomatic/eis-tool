@@ -144,6 +144,20 @@ class Targets(unittest.TestCase):
         self.assertEqual(weights, {})
         self.assertEqual(uuids, {})
 
+    def test_a_list_saved_with_a_byte_order_mark_still_names_its_targets(self):
+        # Windows editors and PowerShell's `Set-Content -Encoding utf8` both prepend a BOM.
+        # Read as plain utf-8 the first id is not a number, `as_url` sends it to `resolve`,
+        # and the run says "no EIS procurement behind it" about a procurement that is
+        # plainly there — pointing the reader at the portal instead of at their editor.
+        path = os.path.join(tempfile.mkdtemp(prefix="eis_bom_"), "t.txt")
+        self.addCleanup(shutil.rmtree, os.path.dirname(path), True)
+        with open(path, "wb") as fh:
+            fh.write(b"\xef\xbb\xbf174527\n178056\n")
+        targets, _weights, _uuids = batch.targets_from(path)
+        self.assertEqual(targets, ["174527", "178056"])
+        self.assertEqual(batch.as_url(targets[0]),
+                         "https://www.eis.gov.lv/EKEIS/Supplier/Procurement/174527")
+
     def test_a_bare_id_becomes_a_url_without_asking_the_network(self):
         self.assertEqual(batch.as_url("178475"),
                          "https://www.eis.gov.lv/EKEIS/Supplier/Procurement/178475")

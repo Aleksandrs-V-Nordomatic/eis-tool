@@ -226,7 +226,12 @@ def targets_from(path=None, days=None, date_from=None, date_to=None, no_gate=Fal
     either, so it contributes no uuid and its packs come back `register_check: unverified`.
     """
     if path:
-        with open(path, encoding="utf-8") as fh:
+        # `utf-8-sig`, because a list typed on Windows arrives with a byte-order mark and
+        # the first id then is not a number. `as_url` sends it to `resolve`, which answers
+        # None, and the run reports "no EIS procurement behind it" for a target that is
+        # plainly there — a diagnosis that sends the reader to the portal instead of to
+        # their text editor.
+        with open(path, encoding="utf-8-sig") as fh:
             lines = [l.split("#")[0].strip() for l in fh]
         return [l for l in lines if l], {}, {}
     found = eis_tool.discover(days=days or 1, date_from=date_from, date_to=date_to)
