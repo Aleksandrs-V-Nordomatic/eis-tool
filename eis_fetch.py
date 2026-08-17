@@ -401,7 +401,7 @@ def unpack_record_zip(path, dest_dir, record, seen, workdir):
 
 
 # ------------------------------------------------------------------------------------ main
-def fetch(url, out_dir, sections=None):
+def fetch(url, out_dir, sections=None, register_uuid=None):
     page_url, pid = canonical_url(url)
     out_dir = os.path.abspath(out_dir)
     docs_dir = os.path.join(out_dir, "documents")
@@ -453,8 +453,9 @@ def fetch(url, out_dir, sections=None):
 
     # The page is in hand and it carries the tender's own facts — title, buyer, deadline,
     # value, CPV. Reading them here costs nothing and is usually the only chance: most live
-    # procurements have no IUB notice to fall back on.
-    procurement = eis_page.parse_notice(html, pid)
+    # procurements have no IUB notice to fall back on. `register_uuid` is the one thing the
+    # page cannot be trusted for, so it comes down from the caller instead of up from here.
+    procurement = eis_page.parse_notice(html, pid, register_uuid=register_uuid)
     if procurement:
         with open(os.path.join(out_dir, "procurement.json"), "w", encoding="utf-8") as fh:
             json.dump(procurement, fh, ensure_ascii=False, indent=2)

@@ -221,14 +221,17 @@ def take_shard(targets, shard, of, weights=None):
 
 
 def targets_from(path=None, days=None, date_from=None, date_to=None, no_gate=False):
-    """(targets, weights). A hand-written list carries no register data, so it weighs 1."""
+    """(targets, weights, uuids). A hand-written list carries no register data, so it
+    weighs 1 — and, having come from nobody knows where, proves nothing about the register
+    either, so it contributes no uuid and its packs come back `register_check: unverified`.
+    """
     if path:
         with open(path, encoding="utf-8") as fh:
             lines = [l.split("#")[0].strip() for l in fh]
-        return [l for l in lines if l], {}
+        return [l for l in lines if l], {}, {}
     found = eis_tool.discover(days=days or 1, date_from=date_from, date_to=date_to)
     policy = None if no_gate else load_policy()
-    targets, weights, dropped = [], {}, 0
+    targets, weights, uuids, dropped = [], {}, {}, 0
     for n in found["notices"]:
         if not n["eis_url"]:
             continue
@@ -237,10 +240,15 @@ def targets_from(path=None, days=None, date_from=None, date_to=None, no_gate=Fal
             continue
         targets.append(n["eis_url"])
         weights[n["eis_url"]] = weigh(n)
+        # The register notice this target came from. Carried the whole way down so the pack
+        # records that membership was established by discovery, rather than re-deriving it
+        # from a page that usually does not say.
+        if n.get("uuid"):
+            uuids[n["eis_url"]] = n["uuid"]
     if dropped:
         say("pre-download filter: %d of %d notice(s) matched no recall term - not fetched"
             % (dropped, dropped + len(targets)))
-    return targets, weights
+    return targets, weights, uuids
 
 
 def as_url(target):
@@ -261,7 +269,7 @@ def post_process(pack, llm_max_files=None):
     eis_tool.read_scans(pack, limit=llm_max_files)
 
 
-def run(targets, out, llm_max_files=None, workers=1, sections=None):
+def run(targets, out, llm_max_files=None, workers=1, sections=None, uuids=None):
     """Download in order, post-process behind it. Returns (done, failed)."""
     out = os.path.abspath(out)
     os.makedirs(out, exist_ok=True)
@@ -312,7 +320,11 @@ def run(targets, out, llm_max_files=None, workers=1, sections=None):
         say("[%d/%d] %s" % (position, len(targets), url))
         try:
             # The one place that talks to the portal, and it is single-file on purpose.
-            eis_fetch.fetch(url, pack, sections)
+            # `target` is the key, not `url`: they differ when the caller named an IUB
+            # notice and `as_url` resolved it, and the uuid map is keyed by what discovery
+            # produced.
+            eis_fetch.fetch(url, pack, sections,
+                            register_uuid=(uuids or {}).get(target) or (uuids or {}).get(url))
         except eis_fetch.Fail as exc:
             failed.append("%s — %s" % (url, str(exc)[:200]))
             say("  FAILED %s — %s" % (pid, str(exc)[:100]))
@@ -365,8 +377,8 @@ def main(argv=None):
     if not args.targets and args.days is None and not args.date_from:
         ap.error("give --targets, or --days/--from to discover")
     try:
-        targets, weights = targets_from(args.targets, args.days, args.date_from,
-                                        args.date_to, args.no_gate)
+        targets, weights, uuids = targets_from(args.targets, args.days, args.date_from,
+                                               args.date_to, args.no_gate)
     except RuntimeError as exc:
         print(exc, file=sys.stderr)
         return 2
@@ -384,7 +396,7 @@ def main(argv=None):
     else:
         say("batch of %d target(s)" % len(targets))
     sections = eis_fetch.SECTIONS[:1] if args.skip_archive else None
-    done, failed = run(targets, args.out, args.llm_max_files, sections=sections)
+    done, failed = run(targets, args.out, args.llm_max_files, sections=sections, uuids=uuids)
     # A tender that could not be fetched is recorded, not fatal: the run still delivered
     # everything else, and a caller that treated this as total failure would throw it away.
     return 0 if done else (1 if failed else 0)

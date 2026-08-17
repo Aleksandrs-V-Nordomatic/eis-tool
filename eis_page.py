@@ -264,8 +264,14 @@ def field(fields, key):
     return None
 
 
-def parse_notice(page, pid):
-    """Everything the public page carries about one procurement. None if it is not published."""
+def parse_notice(page, pid, register_uuid=None):
+    """Everything the public page carries about one procurement. None if it is not published.
+
+    `register_uuid` is what the CALLER already knows: the register notice this page was
+    reached from. Pass it whenever the target came out of `discover`, because register
+    membership is not a fact this page reliably carries — see `register_check` below — and
+    the caller's knowledge beats a guess made from HTML every time.
+    """
     if not is_published(page):
         return None
 
@@ -282,28 +288,32 @@ def parse_notice(page, pid):
         "currency": "EUR",
         "buyer": buyer_name.strip() or None,
         "buyer_reg": buyer_reg.strip() or None,
-        "iub_uuid": iub.group(1) if iub else None,
-        # WHAT THIS FLAG SAYS: this page printed no register hyperlink of either shape.
+        "iub_uuid": register_uuid or (iub.group(1) if iub else None),
+        # HOW REGISTER MEMBERSHIP WAS ESTABLISHED, AND WHETHER IT WAS ESTABLISHED AT ALL.
         #
-        # WHAT IT DOES NOT SAY, THOUGH IT USED TO CLAIM IT: that the register lacks the
-        # procurement, and therefore that it sits below the publication duty and is small.
-        # It cannot say that. Discovery reaches this page BY searching the register
-        # (`eis_tool.discover`), so everything the pipeline collects is in the register by
-        # construction, and no flagged procurement is one the register misses.
+        #   "discovery"  the caller found this procurement BY searching the register, so it
+        #                is in the register and there is nothing to infer
+        #   "page-link"  the page printed a register link — a notice or a planning
+        #                publication — and that link is the evidence
+        #   "unverified" the page printed neither, and nobody asked the register
         #
-        # Measured over 169 collected pages: 43 come back flagged. Fetching a sample of
-        # them live settles what the flag is reading — five of six carried NO iub.gov.lv
-        # URL anywhere in the HTML, and the sixth carried a planning link. So for almost
-        # all of them the page simply does not publish the connection, on a procurement the
-        # register does carry. Widening the pattern cannot fix that: the information is not
-        # on the page to be matched.
-        #
-        # Whether a procurement is genuinely EIS-only is therefore not answerable here, and
-        # is not answered by this corpus either — one absent from the register is never
-        # discovered, so none is present to look at. Enumerating those means walking EIS ids
-        # (`walk_ids`, present and unused). A caller that already knows the notice it came
-        # from should trust that over this flag.
-        "eis_only": iub is None and planning is None,
+        # This field exists because the page cannot answer the question and used to be made
+        # to. Measured over 169 collected pages, 43 carried no register link; six were then
+        # fetched live and five had no iub.gov.lv URL of any shape anywhere in the HTML —
+        # on procurements the register demonstrably carries, since discovery is what found
+        # them. So a missing link is ordinary, and reading it as absence from the register
+        # was wrong in every one of those cases.
+        "register_check": ("discovery" if register_uuid
+                           else "page-link" if (iub or planning)
+                           else "unverified"),
+        # SO THIS MEANS "NOT CONFIRMED TO BE IN THE REGISTER", NOT "ABSENT FROM IT". It used
+        # to mean the second, and on that reading was taken to prove the procurement sits
+        # below the publication duty and is therefore small. Nothing measured that, and this
+        # corpus cannot: one genuinely absent from the register is never discovered, so none
+        # is here to look at. `register_check` says which kind of true this is — and under
+        # `walk_ids`, where the page is the only source, it will be "unverified" rather than
+        # a claim the walk is in no position to make.
+        "eis_only": register_uuid is None and iub is None and planning is None,
         "link": PAGE % pid,
         "source": "EIS",
         "fields": fields,

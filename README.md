@@ -47,7 +47,9 @@ boring, well-understood one.
 
 ```
 pack/
-  procurement.json    the tender's own facts, read off its page
+  procurement.json    the tender's own facts, read off its page — except whether the
+                      register carries it, which the page usually does not say and the
+                      caller usually knows (`register_check`)
   manifest.json       what was downloaded, with sha256 per file
   journal.jsonl       append-only progress — the resume point
   normalized/         one Markdown document per readable file, plus the audit list

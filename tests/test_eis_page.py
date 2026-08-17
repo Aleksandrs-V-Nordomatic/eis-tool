@@ -257,6 +257,27 @@ class ParseNotice(unittest.TestCase):
                                         "178345")
         self.assertTrue(without["eis_only"])
 
+    def test_what_the_caller_knows_beats_what_the_page_shows(self):
+        # The page below prints no register link at all — the ordinary case: of 43 flagged
+        # pages, six were fetched live and five carried no iub.gov.lv URL of any shape.
+        # When the caller reached it BY searching the register, that settles membership and
+        # the page has no standing to contradict it.
+        page = PAGE.replace("eformsb.pvs.iub.gov.lv", "x.example")
+        blind = eis_page.parse_notice(page, "178345")
+        self.assertTrue(blind["eis_only"])
+        self.assertEqual(blind["register_check"], "unverified")
+        self.assertIsNone(blind["iub_uuid"])
+
+        known = eis_page.parse_notice(page, "178345",
+                                      register_uuid="6f1c8a02-0000-4000-8000-00000000abcd")
+        self.assertFalse(known["eis_only"])
+        self.assertEqual(known["register_check"], "discovery")
+        self.assertEqual(known["iub_uuid"], "6f1c8a02-0000-4000-8000-00000000abcd")
+
+    def test_a_page_link_is_evidence_and_says_so(self):
+        self.assertEqual(self.notice["register_check"], "page-link")
+        self.assertFalse(self.notice["eis_only"])
+
     def test_a_planning_publication_is_a_register_link_too(self):
         # A market consultation is published as a planning publication, on a host that
         # differs from the notice host by one letter and under a path that carries a
@@ -268,9 +289,20 @@ class ParseNotice(unittest.TestCase):
             "1078730/content")
         notice = eis_page.parse_notice(page, "178056")
         self.assertFalse(notice["eis_only"])
+        self.assertEqual(notice["register_check"], "page-link")
         # There is no notice uuid in that URL, and inventing one would be worse than none:
         # a caller matching by uuid must miss rather than match the wrong thing.
         self.assertIsNone(notice["iub_uuid"])
+
+    def test_a_walk_reports_unverified_rather_than_claiming_absence(self):
+        # `walk_ids` reaches a page without having asked the register anything, so it is in
+        # no position to say the register lacks the procurement. This is the case the flag
+        # exists for and the one it must not overstate.
+        page = PAGE.replace("eformsb.pvs.iub.gov.lv", "x.example")
+        walked = list(eis_page.walk_ids(1, lambda pid: page if pid == 1 else None,
+                                        stop_after_misses=1))
+        self.assertEqual(len(walked), 1)
+        self.assertEqual(walked[0]["register_check"], "unverified")
 
 
 class ParseDocuments(unittest.TestCase):

@@ -32,11 +32,13 @@ class Recorder(object):
         self.overlapped = False
         self.working = 0
         self.order = []
+        self.register_uuids = []
 
-    def fetch(self, url, pack, sections=None):
+    def fetch(self, url, pack, sections=None, register_uuid=None):
         with self.lock:
             self.in_fetch += 1
             self.peak_fetch = max(self.peak_fetch, self.in_fetch)
+            self.register_uuids.append(register_uuid)
             # The whole point: was somebody reading while this download ran?
             if self.working:
                 self.overlapped = True
@@ -50,7 +52,7 @@ class Recorder(object):
             with self.lock:
                 self.in_fetch -= 1
 
-    def post(self, pack, llm_max_files=None, shards=1):
+    def post(self, pack, llm_max_files=None):
         with self.lock:
             self.working += 1
             self.order.append("read:" + os.path.basename(pack))
@@ -134,11 +136,13 @@ class Targets(unittest.TestCase):
         with open(path, "w", encoding="utf-8") as fh:
             fh.write("# why we asked\n\nhttps://www.eis.gov.lv/EKEIS/Supplier/Procurement/1\n"
                      "  \n2  # a bare id\n")
-        targets, weights = batch.targets_from(path)
+        targets, weights, uuids = batch.targets_from(path)
         self.assertEqual(targets,
                          ["https://www.eis.gov.lv/EKEIS/Supplier/Procurement/1", "2"])
-        # A hand-written list carries no register data, so nothing can be weighed from it.
+        # A hand-written list carries no register data, so nothing can be weighed from it —
+        # and nothing about the register can be claimed for it either.
         self.assertEqual(weights, {})
+        self.assertEqual(uuids, {})
 
     def test_a_bare_id_becomes_a_url_without_asking_the_network(self):
         self.assertEqual(batch.as_url("178475"),
@@ -159,7 +163,7 @@ class ArchiveChoice(unittest.TestCase):
     def test_the_choice_is_passed_down_to_the_downloader(self):
         seen = []
 
-        def fetch(url, pack, sections=None):
+        def fetch(url, pack, sections=None, register_uuid=None):
             seen.append(sections)
             os.makedirs(pack, exist_ok=True)
 
@@ -169,7 +173,7 @@ class ArchiveChoice(unittest.TestCase):
         self.addCleanup(lambda: setattr(batch.eis_fetch, "fetch", old_fetch))
         self.addCleanup(lambda: setattr(batch, "post_process", old_post))
         batch.eis_fetch.fetch = fetch
-        batch.post_process = lambda pack, llm_max_files=None, shards=1: None
+        batch.post_process = lambda pack, llm_max_files=None: None
 
         url = "https://www.eis.gov.lv/EKEIS/Supplier/Procurement/1"
         batch.run([url], out, sections=batch.eis_fetch.SECTIONS[:1])
@@ -178,6 +182,38 @@ class ArchiveChoice(unittest.TestCase):
 
         batch.run([url], out)
         self.assertIsNone(seen[-1], "no choice means take everything")
+
+
+class RegisterProvenance(unittest.TestCase):
+    """The notice a target came from reaches the pack, instead of being re-guessed there.
+
+    Register membership is not something the EIS page reliably carries — measured, 43 of
+    169 collected pages print no register link, and the register holds every one of them.
+    So the run carries down what discovery already knew, and a target nobody vouched for
+    carries nothing rather than a guess.
+    """
+
+    def _run_with(self, targets, uuids):
+        rec = Recorder()
+        out = tempfile.mkdtemp(prefix="eis_prov_")
+        self.addCleanup(shutil.rmtree, out, True)
+        old_fetch, old_post = batch.eis_fetch.fetch, batch.post_process
+        self.addCleanup(lambda: setattr(batch.eis_fetch, "fetch", old_fetch))
+        self.addCleanup(lambda: setattr(batch, "post_process", old_post))
+        batch.eis_fetch.fetch = rec.fetch
+        batch.post_process = rec.post
+        batch.run(targets, out, uuids=uuids)
+        return rec
+
+    def test_the_notice_uuid_reaches_the_downloader(self):
+        url = "https://www.eis.gov.lv/EKEIS/Supplier/Procurement/1"
+        rec = self._run_with([url], {url: "6f1c8a02-0000-4000-8000-00000000abcd"})
+        self.assertEqual(rec.register_uuids, ["6f1c8a02-0000-4000-8000-00000000abcd"])
+
+    def test_a_target_discovery_never_vouched_for_carries_nothing(self):
+        url = "https://www.eis.gov.lv/EKEIS/Supplier/Procurement/2"
+        rec = self._run_with([url], {})
+        self.assertEqual(rec.register_uuids, [None])
 
 
 class Weighing(unittest.TestCase):
