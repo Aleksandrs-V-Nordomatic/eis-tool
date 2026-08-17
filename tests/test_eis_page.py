@@ -48,6 +48,15 @@ PAGE = """
 <label for="Kind">Pamatveids:</label>
 <div class="field-block"><span class="field-text">B&#363;vdarbi</span></div>
 
+<label for="Dur">L&#299;guma darb&#299;bas termi&#326;&#353;:</label>
+<div class="field-block"><span class="field-text">17 M&#275;ne&#353;i</span></div>
+
+<label for="Sel">Izv&#275;les metode:</label>
+<div class="field-block"><span class="field-text">Tikai zem&#257;k&#257;s cenas v&#275;rt&#275;&#353;ana</span></div>
+
+<label for="Doc">Dokument&#257;cijas izsnieg&#353;anas termi&#326;&#353;:</label>
+<div class="field-block"><span class="field-text">2026-08-25 17:00</span></div>
+
 <label for="Person">Kontaktpersona:</label>
 <div class="field-block"><span class="field-text">Jānis Bērziņš, janis@riga.lv, +371 20000000</span></div>
 
@@ -98,6 +107,15 @@ ENGLISH_PAGE = """
 <label for="SubjectDescription_ProcurementObjectTypeId">Object type:</label>
 <div class="field-block"><span class="field-text">Construction works</span></div>
 
+<label for="SubjectDescription_EstimatedContractValue">Expected contract price:</label>
+<div class="field-block"><span class="field-text">5445650.00 EUR</span></div>
+
+<label for="SubjectDescription_ContractDuration">Performance of the contract:</label>
+<div class="field-block"><span class="field-text">17 Months</span></div>
+
+<label for="ProposalSelectionMethodId">Award criteria:</label>
+<div class="field-block"><span class="field-text">Tender with lowest price</span></div>
+
 <script>var ActualDocuments_items = [{"Id": 8362070, "Title": "Nolikums"}];</script>
 </body></html>
 """
@@ -123,6 +141,32 @@ class EnglishPage(unittest.TestCase):
         self.assertEqual(self.notice["deadline"], "27.08.2026 10:00 (scheduled)")
         self.assertEqual(self.notice["cpv_main"], "45000000-7 Celtniecības darbi.")
         self.assertEqual(self.notice["work_kind"], "Construction works")
+        self.assertEqual(self.notice["contract_duration"], "17 Months")
+        self.assertEqual(self.notice["award_criteria"], "Tender with lowest price")
+
+    def test_the_estimated_value_survives_an_english_page(self):
+        # It did not. `_value` was keyed on `EstimatedValue`, an id EIS never emits, so the
+        # lookup fell through to the labels — where the English one was guessed as
+        # "Estimated value" and the page says "Expected contract price". Both routes missed
+        # and the tender came back worth nothing, with no error anywhere. Measured over 169
+        # collected pages: 14 of the 35 English ones published a value and lost all of it,
+        # the largest 5,445,650 EUR. The Latvian label happened to be right, which is why
+        # only half the corpus showed the hole.
+        self.assertEqual(self.notice["value"], 5445650.0)
+        self.assertEqual(self.notice["currency"], "EUR")
+
+    def test_every_field_this_page_carries_resolves_from_the_ids_alone(self):
+        # FIELDS puts the id first precisely so a reworded label cannot lose a field. That
+        # promise only holds if the id is the one EIS emits — and when it is not, the entry
+        # quietly rides on its labels and looks fine until the portal serves the other
+        # language. Stripping every visible label is the cheapest way to say so out loud.
+        ids_only = {k: v for k, v in self.notice["fields"].items() if k.startswith("#")}
+        for key in eis_page.FIELDS:
+            whole = eis_page.field(self.notice["fields"], key)
+            if whole is None:
+                continue
+            self.assertEqual(eis_page.field(ids_only, key), whole,
+                             "%s resolves only through a label — its id is wrong" % key)
 
     def test_the_buyer_splits_on_the_latvian_suffix_even_here(self):
         # `reģ. numurs:` stays Latvian on the English page.
@@ -193,6 +237,18 @@ class ParseNotice(unittest.TestCase):
         # a lookup that misses returns None and the tender loses a field without an error.
         self.assertIn("Organizācijas nosaukums", self.notice["fields"])
         self.assertIn("Paredzamā vērtība", self.notice["fields"])
+
+    def test_the_latvian_labels_are_the_ones_the_portal_prints(self):
+        # This fixture's `for=` attributes are deliberately not platform ids, so every
+        # lookup here lands on the Latvian label — which makes it the only place a stale
+        # spelling shows up. Three were stale: the map asked for "Līguma izpildes termiņš",
+        # "Piedāvājuma izvēles kritērijs" and "Piegādātāju sanāksme" while EIS prints
+        # "Līguma darbības termiņš", "Izvēles metode" and "Apspriedes ar piegādātājiem
+        # termiņš". Their ids were right, so nothing was lost — the fallback was simply
+        # dead, in the exact case it exists to cover.
+        self.assertEqual(self.notice["contract_duration"], "17 Mēneši")
+        self.assertEqual(self.notice["award_criteria"], "Tikai zemākās cenas vērtēšana")
+        self.assertEqual(self.notice["docs_until"], "2026-08-25 17:00")
 
     def test_iub_link_decides_eis_only(self):
         self.assertEqual(self.notice["iub_uuid"], "1b4e28ba-2fa1-11d2-883f-0016d3cca427")

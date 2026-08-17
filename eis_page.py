@@ -215,13 +215,16 @@ FIELDS = {
                     "Applications / proposals submission deadline"),
     "opening":     ("stage_ProposalOpeningDate", "Pieteikumu/piedāvājumu atvēršanas laiks",
                     "Applications / proposals opening"),
-    "docs_until":  ("DocumentIssuanceDate", "Dokumentācijas izsniegšanas termiņš", None),
+    # No English page in the sample carried this one, so its English label stays unknown
+    # rather than guessed — a wrong label is indistinguishable from a silent page.
+    "docs_until":  ("stage_DocumentationAvailabilityDate",
+                    "Dokumentācijas izsniegšanas termiņš", None),
     # A market consultation ("Apspriede ar piegādātājiem") has no proposal deadline,
     # because no proposals are being taken yet — it has a consultation date instead, in a
     # different field. Such a procurement comes back with a null deadline and a real date
     # nobody would have seen. A date you must answer by is a date, whatever the procedure
     # is called, so it gets its own field rather than being folded into deadline.
-    "consultation_until": ("stage_SuppliersGathering", "Piegādātāju sanāksme",
+    "consultation_until": ("stage_SuppliersGathering", "Apspriedes ar piegādātājiem termiņš",
                            "Deadline for consultation with suppliers"),
     "cpv_main":    ("SubjectDescription_CpvMainId", "CPV galvenais kods", "CPV main code"),
     "place":       ("SubjectDescription_ShipmentAddress", "Līguma izpildes vieta",
@@ -230,12 +233,12 @@ FIELDS = {
                     "Procurement is split into lots"),
     "framework":   ("SubjectDescription_IsGeneralAgreement", "Paredzēta vispārīgā vienošanās",
                     "Framework agreement intended"),
-    "contract_duration": ("SubjectDescription_ContractDuration", "Līguma izpildes termiņš",
+    "contract_duration": ("SubjectDescription_ContractDuration", "Līguma darbības termiņš",
                           "Performance of the contract"),
-    "award_criteria": ("ProposalSelectionMethodId", "Piedāvājuma izvēles kritērijs",
-                       "Award criteria"),
+    "award_criteria": ("ProposalSelectionMethodId", "Izvēles metode", "Award criteria"),
     "_buyer":      ("OrganizerId", "Organizācijas nosaukums", "Contracting authority"),
-    "_value":      ("EstimatedValue", "Paredzamā vērtība", "Estimated value"),
+    "_value":      ("SubjectDescription_EstimatedContractValue", "Paredzamā vērtība",
+                    "Expected contract price"),
 }
 
 
@@ -268,8 +271,14 @@ def parse_notice(page, pid):
         "buyer": buyer_name.strip() or None,
         "buyer_reg": buyer_reg.strip() or None,
         "iub_uuid": iub.group(1) if iub else None,
-        # No IUB link means the procurement sits below the Article-9 publication duty, so
-        # the register will never carry it. That is a fact about coverage, not an error.
+        # No IUB link means the register does not carry this procurement, and that is all
+        # it means. It used to say the procurement therefore sits below the publication
+        # duty — i.e. that it is small. Measured over 169 collected pages: 43 are EIS-only,
+        # 9 of them publish a value, and 6 of those 9 are at or above 42,000 EUR — one at
+        # 3,590,000. Their median, 86,000, is the same as the median of the ones the
+        # register does carry. So this flag is a fact about coverage and nothing about
+        # size; 79% of EIS-only pages publish no value at all, so the page cannot settle it
+        # either way.
         "eis_only": iub is None,
         "link": PAGE % pid,
         "source": "EIS",
