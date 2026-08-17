@@ -328,6 +328,19 @@ def parse_notice(page, pid, register_uuid=None):
     buyer = field(fields, "_buyer") or ""
     buyer_name, _, buyer_reg = buyer.partition(", reģ. numurs:")
 
+    # The additional CPV codes, extracted BEFORE the widget that carried them is cut out of
+    # `fields`. The page renders them as a repeater, so the raw "value" under those keys is
+    # kilobytes of the widget's JavaScript — 65% of every procurement.json, measured over
+    # 169 collected pages, and shipped three times per tender: folder, archive, shards.zip.
+    # While the script was the only carrier of the codes it had to stay. Now that they are
+    # first-class it carries nothing, so what stays under the keys is what the page shows a
+    # person — the codes themselves. `fields` still records that the field exists.
+    cpv_extra = cpv_additional(fields)
+    _fid, *_cpv_labels = FIELDS["_cpv_extra"]
+    for k in ["#" + _fid] + [l for l in _cpv_labels if l]:
+        if k in fields:
+            fields[k] = "; ".join(cpv_extra)
+
     notice = {
         "eis_id": str(pid),
         "value": parse_money(field(fields, "_value")),
@@ -365,7 +378,7 @@ def parse_notice(page, pid, register_uuid=None):
         # Beside `cpv_main`, never folded into it: the main code is what the buyer filed the
         # procurement under, and the rest are what else it touches. A consumer deciding by
         # code needs to be able to tell which is which.
-        "cpv_additional": cpv_additional(fields),
+        "cpv_additional": cpv_extra,
         "fields": fields,
     }
     # Everything else comes from the map above, so adding a field is one line there and

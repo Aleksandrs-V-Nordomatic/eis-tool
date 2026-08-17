@@ -278,6 +278,18 @@ class ParseNotice(unittest.TestCase):
         self.assertIn("[1. kārta]", self.notice["cpv_additional"][0])
         self.assertEqual(len(self.notice["cpv_additional"]), 2)
 
+    def test_the_widget_javascript_never_reaches_the_output(self):
+        # The slab was 65% of every delivered procurement.json — measured over 169 pages,
+        # 1.62 MB of 2.50 MB — and every tender ships its procurement.json three times:
+        # folder, archive, shards.zip. What stays under the widget's keys is what the page
+        # shows a person, so `fields` still says the field exists and what it held.
+        blob = json.dumps(self.notice, ensure_ascii=False)
+        self.assertNotIn("CpvAdditionals_items", blob)
+        self.assertNotIn("function", blob)
+        self.assertEqual(
+            self.notice["fields"]["CPV papildkods"],
+            "45200000-9 Izbūves darbi [1. kārta]; 71000000-8 Arhitektu pakalpojumi")
+
     def test_a_procurement_with_no_extra_codes_gets_an_empty_list(self):
         # Absent is a list nobody has to special-case, not None and not a missing key.
         page = PAGE.replace("SubjectDescription_CpvAdditionals_items", "Unrelated_items")
