@@ -257,6 +257,21 @@ class ParseNotice(unittest.TestCase):
                                         "178345")
         self.assertTrue(without["eis_only"])
 
+    def test_a_planning_publication_is_a_register_link_too(self):
+        # A market consultation is published as a planning publication, on a host that
+        # differs from the notice host by one letter and under a path that carries a
+        # numeric id instead of a uuid. Read off procurement 178056 live. Matching only the
+        # notice shape called this page absent from the register while it printed the link.
+        page = PAGE.replace(
+            "https://eformsb.pvs.iub.gov.lv/show/1b4e28ba-2fa1-11d2-883f-0016d3cca427",
+            "https://eforms.pvs.iub.gov.lv/planning-publications/view/pil-discussion/"
+            "1078730/content")
+        notice = eis_page.parse_notice(page, "178056")
+        self.assertFalse(notice["eis_only"])
+        # There is no notice uuid in that URL, and inventing one would be worse than none:
+        # a caller matching by uuid must miss rather than match the wrong thing.
+        self.assertIsNone(notice["iub_uuid"])
+
 
 class ParseDocuments(unittest.TestCase):
     def test_both_sections_are_read_and_the_archive_is_labelled(self):

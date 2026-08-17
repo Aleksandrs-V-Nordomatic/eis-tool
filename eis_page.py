@@ -76,7 +76,18 @@ _FIELD = re.compile(r'class="[^"]*field-block[^"]*"[^>]*>(.*?)</div>', re.S)
 _MONEY = re.compile(r"(\d[\d\s]*[.,]?\d*)\s*(EUR|USD)?")
 _PERSONAL = re.compile(r"kontakt|e-?past|t[āa]lru|person", re.I)
 _TAG = re.compile(r"<[^>]+>")
+# The register publishes two shapes, under two hosts, and only one of them is a notice
+# with a uuid. A market consultation is a planning publication:
+#
+#   competition   https://eformsb.pvs.iub.gov.lv/show/<uuid>
+#   planning      https://eforms.pvs.iub.gov.lv/planning-publications/view/<kind>/<id>
+#
+# Matching only the first read a printed planning link as no link at all. Note the hosts
+# differ by one letter — `eformsb` against `eforms` — which is why this is two patterns
+# and not one with an alternation in the path.
 _IUB = re.compile(r"https://eformsb\.pvs\.iub\.gov\.lv/show/([0-9a-f\-]{36})")
+_IUB_PLANNING = re.compile(
+    r"https://eforms\.pvs\.iub\.gov\.lv/planning-publications/view/[a-z0-9\-]+/(\d+)")
 # The EIS link as it appears on an IUB notice page. IUB's own search API does not carry it,
 # so the only route from a notice to its documents runs through the notice HTML.
 _EIS_LINK = re.compile(r"eis\.gov\.lv/EKEIS/Supplier/Procurement/(\d+)")
@@ -260,6 +271,7 @@ def parse_notice(page, pid):
 
     fields = parse_fields(page)
     iub = _IUB.search(page)
+    planning = _IUB_PLANNING.search(page)
     # The registration number is appended to the buyer in Latvian even on the English page.
     buyer = field(fields, "_buyer") or ""
     buyer_name, _, buyer_reg = buyer.partition(", reģ. numurs:")
@@ -271,29 +283,27 @@ def parse_notice(page, pid):
         "buyer": buyer_name.strip() or None,
         "buyer_reg": buyer_reg.strip() or None,
         "iub_uuid": iub.group(1) if iub else None,
-        # WHAT THIS FLAG ACTUALLY SAYS: this page printed no hyperlink of the one shape
-        # `_IUB` matches. It does NOT say the register lacks the procurement, and it cannot
-        # — discovery reaches this page BY searching the register (`eis_tool.discover`), so
-        # everything the pipeline collects is in the register by construction.
+        # WHAT THIS FLAG SAYS: this page printed no register hyperlink of either shape.
         #
-        # Measured over 169 collected pages, 43 come back flagged, and none of them is a
-        # procurement the register misses:
+        # WHAT IT DOES NOT SAY, THOUGH IT USED TO CLAIM IT: that the register lacks the
+        # procurement, and therefore that it sits below the publication duty and is small.
+        # It cannot say that. Discovery reaches this page BY searching the register
+        # (`eis_tool.discover`), so everything the pipeline collects is in the register by
+        # construction, and no flagged procurement is one the register misses.
         #
-        #   * 26 are market consultations. Their register publication is a planning
-        #     publication, served as
-        #     `https://eforms.pvs.iub.gov.lv/planning-publications/view/pil-discussion/<id>`
-        #     — a different host and a different path from the `eformsb…/show/<uuid>` this
-        #     regex knows. 26 of the 28 consultations collected are flagged; among
-        #     everything else the rate is 17 of 141.
-        #   * the rest print the field empty: the buyer left it blank on a procurement the
-        #     register carries anyway.
+        # Measured over 169 collected pages: 43 come back flagged. Fetching a sample of
+        # them live settles what the flag is reading — five of six carried NO iub.gov.lv
+        # URL anywhere in the HTML, and the sixth carried a planning link. So for almost
+        # all of them the page simply does not publish the connection, on a procurement the
+        # register does carry. Widening the pattern cannot fix that: the information is not
+        # on the page to be matched.
         #
-        # It used to claim the opposite — that a missing link put the procurement below the
-        # publication duty, i.e. that it was small. Nothing measured that, and it cannot be
-        # measured from this corpus at all: a procurement genuinely absent from the register
-        # is never discovered, so none is here to look at. Enumerating those means walking
-        # EIS ids (`walk_ids`, present and unused).
-        "eis_only": iub is None,
+        # Whether a procurement is genuinely EIS-only is therefore not answerable here, and
+        # is not answered by this corpus either — one absent from the register is never
+        # discovered, so none is present to look at. Enumerating those means walking EIS ids
+        # (`walk_ids`, present and unused). A caller that already knows the notice it came
+        # from should trust that over this flag.
+        "eis_only": iub is None and planning is None,
         "link": PAGE % pid,
         "source": "EIS",
         "fields": fields,
