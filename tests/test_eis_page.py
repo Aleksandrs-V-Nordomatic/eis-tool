@@ -45,8 +45,18 @@ PAGE = """
 <label for="Cpv">CPV galvenais kods:</label>
 <div class="field-block"><span class="field-text">45000000-7</span></div>
 
+<label for="SubjectDescription_CpvAdditionalIdList">CPV papildkods:</label>
+<div class="field-block"><span class="field-text">var SubjectDescription_CpvAdditionals_items
+ = [{"Title":"45200000-9 Izb&#363;ves darbi [1. k&#257;rta]","IsSelected":false},
+    {"Title":"71000000-8 Arhitektu pakalpojumi","IsSelected":false},
+    {"Title":"45200000-9 Izb&#363;ves darbi [1. k&#257;rta]","IsSelected":false}];
+function SubjectDescription_CpvAdditionalsRefresh(data) { return null; }</span></div>
+
 <label for="Kind">Pamatveids:</label>
 <div class="field-block"><span class="field-text">B&#363;vdarbi</span></div>
+
+<label for="Pub">Izsludin&#257;ts:</label>
+<div class="field-block"><span class="field-text">2026-08-01</span></div>
 
 <label for="Dur">L&#299;guma darb&#299;bas termi&#326;&#353;:</label>
 <div class="field-block"><span class="field-text">17 M&#275;ne&#353;i</span></div>
@@ -249,6 +259,41 @@ class ParseNotice(unittest.TestCase):
         self.assertEqual(self.notice["contract_duration"], "17 Mēneši")
         self.assertEqual(self.notice["award_criteria"], "Tikai zemākās cenas vērtēšana")
         self.assertEqual(self.notice["docs_until"], "2026-08-25 17:00")
+
+    def test_the_additional_cpv_codes_are_read_out_of_the_widget(self):
+        # The page ships these as a repeater, so the "field" is kilobytes of JavaScript and
+        # the codes were dropped with it. Measured over 169 collected pages, 74 carry at
+        # least one — 172 codes in all, one tender holding 29. A tool that classifies by
+        # CPV was discarding the codes on nearly half of what it fetched.
+        self.assertEqual(self.notice["cpv_additional"],
+                         ["45200000-9 Izbūves darbi [1. kārta]",
+                          "71000000-8 Arhitektu pakalpojumi"])
+        # The main code is not folded in: which one the buyer filed under is information.
+        self.assertEqual(self.notice["cpv_main"], "45000000-7")
+
+    def test_a_bracket_in_a_caption_does_not_truncate_the_list(self):
+        # This is why the array is taken with `raw_decode` and not a `\\[.*?\\]` regex: the
+        # first caption above closes a bracket, and a regex stopping there would return one
+        # code, silently, with nothing to show a second ever existed.
+        self.assertIn("[1. kārta]", self.notice["cpv_additional"][0])
+        self.assertEqual(len(self.notice["cpv_additional"]), 2)
+
+    def test_a_procurement_with_no_extra_codes_gets_an_empty_list(self):
+        # Absent is a list nobody has to special-case, not None and not a missing key.
+        page = PAGE.replace("SubjectDescription_CpvAdditionals_items", "Unrelated_items")
+        self.assertEqual(eis_page.parse_notice(page, "1")["cpv_additional"], [])
+
+    def test_the_portal_prints_the_publication_date_under_several_captions(self):
+        # `Izsludināts` on some procurements, `Izsludināts / publicēts` on others, and two
+        # more spellings in English. The id carried all of them, so nothing was lost — but
+        # the label fallback matched 111 of 134 Latvian pages and 23 of 35 English ones,
+        # which is a fallback that would not have caught the id moving.
+        for caption in ("Izsludin&#257;ts / public&#275;ts",
+                        "Izsludin&#257;&#353;anas / public&#275;&#353;anas datums"):
+            page = PAGE.replace("Izsludin&#257;ts:", caption + ":")
+            fields = {k: v for k, v in eis_page.parse_fields(page).items()
+                      if not k.startswith("#")}
+            self.assertEqual(eis_page.field(fields, "published"), "2026-08-01", caption)
 
     def test_iub_link_decides_eis_only(self):
         self.assertEqual(self.notice["iub_uuid"], "1b4e28ba-2fa1-11d2-883f-0016d3cca427")

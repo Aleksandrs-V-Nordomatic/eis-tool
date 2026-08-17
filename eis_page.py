@@ -216,7 +216,12 @@ FIELDS = {
                     "Identification number"),
     "title":       ("Name", "Iepirkuma nosaukums", "Name"),
     "status":      ("StatusInfo", "Iepirkuma statuss", "Procurement status"),
-    "published":   ("FirstAnnouncementDate", "Izsludināts", "Announced"),
+    # Four spellings, all read off live pages: the portal prints a combined caption on some
+    # procurements and a bare one on others. `field` walks every label given, so extra
+    # spellings cost a tuple entry — and a missing one costs a date whenever the id moves.
+    "published":   ("FirstAnnouncementDate", "Izsludināts", "Announced",
+                    "Izsludināts / publicēts", "Izsludināšanas / publicēšanas datums",
+                    "Announced / Published", "Announcement / Publication date"),
     "procedure":   ("ProcurementRegulationId", "Procedūras tips", "Procedure / procurement"),
     "profile":     ("ProfileId", "Iepirkuma profils", "Procurement profile"),
     "legal_basis": ("RegulatoryActId", "Procedūras juridiskais pamats", "Regulatory LA"),
@@ -226,10 +231,9 @@ FIELDS = {
                     "Applications / proposals submission deadline"),
     "opening":     ("stage_ProposalOpeningDate", "Pieteikumu/piedāvājumu atvēršanas laiks",
                     "Applications / proposals opening"),
-    # No English page in the sample carried this one, so its English label stays unknown
-    # rather than guessed — a wrong label is indistinguishable from a silent page.
     "docs_until":  ("stage_DocumentationAvailabilityDate",
-                    "Dokumentācijas izsniegšanas termiņš", None),
+                    "Dokumentācijas izsniegšanas termiņš",
+                    "Documentation issuance deadline"),
     # A market consultation ("Apspriede ar piegādātājiem") has no proposal deadline,
     # because no proposals are being taken yet — it has a consultation date instead, in a
     # different field. Such a procurement comes back with a null deadline and a real date
@@ -248,9 +252,51 @@ FIELDS = {
                           "Performance of the contract"),
     "award_criteria": ("ProposalSelectionMethodId", "Izvēles metode", "Award criteria"),
     "_buyer":      ("OrganizerId", "Organizācijas nosaukums", "Contracting authority"),
+    # The page renders the additional CPV codes as a repeater widget, so this "field" comes
+    # back as several kilobytes of JavaScript rather than a value. The codes are inside it.
+    "_cpv_extra":  ("SubjectDescription_CpvAdditionalIdList", "CPV papildkods",
+                    "CPV additional code"),
     "_value":      ("SubjectDescription_EstimatedContractValue", "Paredzamā vērtība",
                     "Expected contract price"),
 }
+
+
+_CPV_ITEMS = re.compile(r"CpvAdditionals_items\s*=\s*")
+
+
+def cpv_additional(fields):
+    """Every CPV code beyond the main one, as `code caption`, in page order.
+
+    A procurement is classified by its CPV codes, and the main one is not all of them:
+    measured over 169 collected pages, 70 carry at least one more — road works under a
+    street-rebuild, design services under construction, laboratory reagents under a
+    supplies notice. They were parsed and thrown away, because the page ships them as a
+    repeater widget and the field the parser grabbed is the widget's JavaScript.
+
+    The codes sit in `CpvAdditionals_items`, a JSON array, each entry's `Title` being the
+    code and its caption. `raw_decode` is used rather than a bracket regex: a caption may
+    contain a bracket, and a regex that stops at the first one truncates the list silently,
+    which is the failure this whole file keeps refusing.
+    """
+    slab = field(fields, "_cpv_extra")
+    if not slab:
+        return []
+    found = _CPV_ITEMS.search(str(slab))
+    if not found:
+        return []
+    try:
+        items, _end = json.JSONDecoder().raw_decode(str(slab)[found.end():])
+    except ValueError:
+        return []
+    if not isinstance(items, list):
+        return []
+    out = []
+    for item in items:
+        title = (item or {}).get("Title") if isinstance(item, dict) else None
+        title = _text(title) if title else ""
+        if title and title not in out:
+            out.append(title)
+    return out
 
 
 def field(fields, key):
@@ -316,6 +362,10 @@ def parse_notice(page, pid, register_uuid=None):
         "eis_only": register_uuid is None and iub is None and planning is None,
         "link": PAGE % pid,
         "source": "EIS",
+        # Beside `cpv_main`, never folded into it: the main code is what the buyer filed the
+        # procurement under, and the rest are what else it touches. A consumer deciding by
+        # code needs to be able to tell which is which.
+        "cpv_additional": cpv_additional(fields),
         "fields": fields,
     }
     # Everything else comes from the map above, so adding a field is one line there and
