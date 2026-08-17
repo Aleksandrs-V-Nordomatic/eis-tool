@@ -8,13 +8,13 @@ Many tenders, one polite download stream, and the reading done in the gaps.
 
 WHERE THE TIME GOES. A record costs a little work and then a pause several times longer —
 the pause that keeps EIS answering us. Most of a tender's wall clock is therefore spent
-waiting, while its own post-processing (extract, OCR, précis) sits behind it. Run strictly
+waiting, while its own post-processing (extract, OCR) sits behind it. Run strictly
 sequentially, a day of tenders takes hours.
 
 So the shape here is a producer and a consumer:
 
     main thread   download tender 1 ─ pause ─ download tender 2 ─ pause ─ ...
-    worker thread              └─ extract 1, read scans, summarise ─┘
+    worker thread              └─ extract 1, read scans ─┘
 
 DOWNLOADING STAYS SINGLE-FILE AND PACED, AND THAT IS NOT NEGOTIABLE. Exactly one thread
 ever speaks to EIS. The portal sees the same one polite client it saw before — same order,
@@ -253,16 +253,15 @@ def as_url(target):
     return eis_tool.resolve(target)
 
 
-def post_process(pack, llm_max_files=None, shards=1):
+def post_process(pack, llm_max_files=None):
     """Everything that happens after the bytes are on disk. Runs off the download thread."""
     code = eis_tool.extract(pack, keep_unpacked=True)
     if code:
         raise RuntimeError("normalize exited %s" % code)
     eis_tool.read_scans(pack, limit=llm_max_files)
-    eis_tool.summarise(pack, shards=shards)
 
 
-def run(targets, out, llm_max_files=None, workers=1, sections=None, shards=1):
+def run(targets, out, llm_max_files=None, workers=1, sections=None):
     """Download in order, post-process behind it. Returns (done, failed)."""
     out = os.path.abspath(out)
     os.makedirs(out, exist_ok=True)
@@ -285,7 +284,7 @@ def run(targets, out, llm_max_files=None, workers=1, sections=None, shards=1):
                 return
             pack, url = item
             try:
-                post_process(pack, llm_max_files, shards)
+                post_process(pack, llm_max_files)
                 with lock:
                     done.append(os.path.basename(pack))
                 say("  read   %s" % os.path.basename(pack))
@@ -385,8 +384,7 @@ def main(argv=None):
     else:
         say("batch of %d target(s)" % len(targets))
     sections = eis_fetch.SECTIONS[:1] if args.skip_archive else None
-    done, failed = run(targets, args.out, args.llm_max_files, sections=sections,
-                       shards=args.of)
+    done, failed = run(targets, args.out, args.llm_max_files, sections=sections)
     # A tender that could not be fetched is recorded, not fatal: the run still delivered
     # everything else, and a caller that treated this as total failure would throw it away.
     return 0 if done else (1 if failed else 0)

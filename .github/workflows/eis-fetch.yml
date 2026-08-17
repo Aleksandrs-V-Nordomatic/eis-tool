@@ -121,20 +121,7 @@ jobs:
         continue-on-error: true
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
         run: python3 assist.py --pack out || true
-
-      # One line per document saying what it is. A day runs to millions of characters across
-      # thousands of documents, so a reader has to choose what to open — and choosing blind
-      # is what truncation does today. Navigation only: a precis is never a located quote.
-      # Optional like the lane above; without MISTRAL_API_KEY the step says so and the pack
-      # is complete without an index.
-      - name: Say what each document is
-        if: steps.go.outputs.go == 'yes'
-        continue-on-error: true
-        env:
-          MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
-        run: python3 precis.py --pack out || true
 
       # Integrity is asserted on the runner and again after retrieval, so a truncated transfer
       # cannot look like a clean download.
@@ -157,7 +144,6 @@ jobs:
             out/procurement.json
             out/normalized/**
             out/llm/**
-            out/precis/**
           retention-days: 14
 
       - name: Upload the originals

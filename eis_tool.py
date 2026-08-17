@@ -165,30 +165,6 @@ def read_scans(pack, model=None, limit=None, provider=None):
     return 0
 
 
-def summarise(pack, limit=None, shards=1):
-    """One line per document saying what it is. Optional; never fails the run.
-
-    A day runs to millions of characters across thousands of documents, so whatever
-    assembles a reading packet is already truncating blindly. This turns that cut into a
-    choice. Navigation only — a precis is never a quote (see precis.py).
-    """
-    import precis as precis_mod
-    _, _, env_var = precis_mod.PROVIDERS[precis_mod.DEFAULT_PROVIDER]
-    api_key = os.environ.get(env_var)
-    if not api_key:
-        print("precis skipped — %s not set (the pack is complete without an index)" % env_var)
-        return 0
-    try:
-        doc = precis_mod.run(pack, api_key=api_key, limit=limit,
-                             interval=precis_mod.share_of_budget(shards))
-    except (RuntimeError, OSError) as exc:
-        print("precis skipped — %s" % str(exc)[:160])
-        return 0
-    print("precis · %d summarised · %d deferred · %d skipped"
-          % (doc["summarised"], doc["deferred"], doc["skipped"]))
-    return 0
-
-
 def main(argv=None):
     utf8_streams()
 
@@ -278,7 +254,6 @@ def main(argv=None):
     if code:
         return code
     read_scans(out, model=args.model, limit=args.llm_max_files)
-    summarise(out)
 
     summary = os.path.join(out, "summary.json")
     if os.path.exists(summary):

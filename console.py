@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """Printing Latvian without letting the terminal end the run.
 
-Everything here is Latvian: tender titles, filenames, the text of a précis. On a Windows
+Everything here is Latvian: tender titles, filenames, extracted document text. On a Windows
 console the default codec cannot encode `ā`, and `print()` then raises — which killed a CLI
 once on the first tender title it tried to show, and killed a library function again later
 because a caller's stdout happened to be cp1252.

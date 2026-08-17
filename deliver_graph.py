@@ -203,7 +203,7 @@ def selection(pack):
         for n in sorted(names):
             ap = os.path.join(root, n)
             rel = os.path.relpath(ap, pack).replace(os.sep, "/")
-            if n in KEEP_NAMES or "/precis/" in "/" + rel:
+            if n in KEEP_NAMES:
                 yield rel, ap
 
 
@@ -264,10 +264,7 @@ def flatten(pack):
         except ValueError:
             continue
 
-    # `renamed` goes back with the rest because the precis sidecar keys on the ORIGINAL
-    # markdown path, and by the time anything else sees this manifest the path has been
-    # rewritten. Joining without it silently yields a precis for nothing.
-    return out, manifest, renamed, merged
+    return out, manifest, merged
 
 
 def load_json(pack, *rel):
@@ -278,7 +275,7 @@ def load_json(pack, *rel):
         return json.load(fh)
 
 
-def index_entry(pid, pack, manifest, renamed=None):
+def index_entry(pid, pack, manifest):
     """One tender: what is here, and what it is worth opening.
 
     Delivered twice — once inside the tender as its own `index.json`, and once as a line in
@@ -292,25 +289,11 @@ def index_entry(pid, pack, manifest, renamed=None):
     the reader reads the index, decides which documents are worth the window, and opens
     only those.
 
-    Everything here is the carrier's own data — the normalized manifest, the precis sidecar
-    and the procurement page. No judgement is made and none can be: which tenders matter is
-    the consumer's business and never travels through this repository.
+    Everything here is the carrier's own data — the normalized manifest and the procurement
+    page. No judgement is made and none can be: which tenders matter is the consumer's
+    business and never travels through this repository.
     """
     proc = load_json(pack, "procurement.json") or {}
-    precis = load_json(pack, "precis", "manifest_precis.json") or {}
-
-    # The sidecar keys on the ORIGINAL markdown path and the manifest now carries the
-    # flattened one, so the join runs through `renamed`. An absent precis means "unknown",
-    # never "not relevant".
-    renamed = renamed or {}
-    by_flat = {}
-    for e in (precis.get("documents") or precis.get("entries") or []):
-        orig = e.get("markdown_path")
-        if not orig or not e.get("precis"):
-            continue
-        flat = renamed.get("normalized/" + orig.lstrip("/"))
-        if flat:
-            by_flat[flat[len("normalized/"):]] = e["precis"]
 
     docs = []
     for e in (manifest or {}).get("documents", []):
@@ -324,7 +307,6 @@ def index_entry(pid, pack, manifest, renamed=None):
             "section": e.get("section"),
             "record": e.get("record_title"),
             "chars": e.get("markdown_chars"),
-            "precis": by_flat.get(mp.lstrip("/")),
         })
 
     return {
@@ -390,13 +372,13 @@ def main(argv=None):
         pack = os.path.join(args.packs, pid)
         if not os.path.isdir(pack):
             continue
-        pack_files, manifest, renamed, structures = flatten(pack)
+        pack_files, manifest, structures = flatten(pack)
         # One file per tender, keyed by the flattened document name — what Word keeps as a
         # paragraph property rather than as text, so a consumer can rebuild a clause number
         # instead of counting paragraphs and being wrong. Absent when nothing in the tender
         # was a numbered Word document, which is the ordinary case for a pack of PDFs.
 
-        entry = index_entry(pid, pack, manifest, renamed)
+        entry = index_entry(pid, pack, manifest)
         archive_name = "%s.zip" % pid
         index_name = "%s.index.json" % pid
         entry["archive"] = archive_name
