@@ -579,7 +579,14 @@ def fetch(url, out_dir, sections=None, register_uuid=None):
                # The pace this pack was fetched at. Without it, a later comparison of two
                # days cannot tell a faster portal from a shorter pause.
                "pause_seconds": PAUSE_BETWEEN_RECORDS,
+               # `files` and `bytes` count references: a document two records share is
+               # downloaded for each and counted for each, which is what the run cost.
+               # `unique_files` counts paths, which is what the originals archive stores —
+               # its member count is unique_files + 1, the one being manifest.json. Both
+               # numbers are honest; carrying both is what keeps an audit of one against
+               # the other from reading as loss.
                "records": len(manifest), "files": total_files,
+               "unique_files": len({f["path"] for r in manifest for f in r["files"]}),
                "bytes": sum(f["size"] for r in manifest for f in r["files"]),
                "originals_zip": os.path.basename(originals),
                "originals_sha256": sha256_file(originals),

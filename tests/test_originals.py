@@ -77,6 +77,16 @@ class Originals(unittest.TestCase):
             self.build()
         self.assertEqual([str(w.message) for w in caught], [])
 
+    def test_the_archive_stores_unique_paths_plus_the_manifest(self):
+        # summary.json carries both counts side by side: `files` counts references — what
+        # the run downloaded, a shared document once per record — and `unique_files` counts
+        # paths, which is what this archive stores. The relation an auditor will reach for
+        # is pinned here: members are the unique paths plus manifest.json, nothing else.
+        with zipfile.ZipFile(self.build()) as z:
+            members = z.namelist()
+        unique = {f["path"] for r in self.manifest for f in r["files"]}
+        self.assertEqual(len(members), len(unique) + 1)
+
     def test_the_manifest_still_records_both_records(self):
         # The repetition is information and stays in the manifest; only the bytes are
         # deduplicated. A consumer must still be able to see which records named the file.

@@ -94,6 +94,9 @@ Every tender is published twice on purpose. The archive is one request whatever 
 weighs; the folder is one request per file, and a day runs about forty documents per
 tender, so the folder is the expensive half by roughly that factor. It is delivered anyway
 because the two serve different readers, and neither should have to pay the other's price.
+A re-delivered tender's folder is cleared before it is refilled — delivery otherwise never
+removes files, and a tender that shrank would keep documents no index names. The archive is
+simply replaced.
 
 `shards.zip` carries the archives and the sidecars, not a second copy of the folders: a
 reader taking the whole day wants the bytes once.

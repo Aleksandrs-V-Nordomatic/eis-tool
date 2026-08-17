@@ -211,6 +211,41 @@ def upload_file(drive, dest, path, tok):
         upload_stream(drive, dest, fh, os.path.getsize(path), tok)
 
 
+def delete(drive, dest, tok, tries=5):
+    """Remove one item, file or folder. Absent already counts as removed.
+
+    This exists for the folder rendering of a tender: delivery overwrites files and never
+    removes them, and the flattened document names are sequential — so re-delivering a
+    tender that shrank would leave files in its folder that no index names and the archive
+    does not hold. One DELETE clears the ground the forty-odd uploads are about to cover.
+    A first delivery finds nothing there, and that is the goal state, not an error.
+    """
+    safe = "/".join(urllib.parse.quote(p, safe="") for p in dest.split("/"))
+    url = "%s/drives/%s/root:/%s:" % (GRAPH, drive, safe)
+    for attempt in range(tries):
+        req = urllib.request.Request(url, method="DELETE")
+        req.add_header("Authorization", "Bearer " + tok)
+        try:
+            with urllib.request.urlopen(req, timeout=60):
+                return True
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return False
+            if e.code in (429, 500, 502, 503, 504) and attempt < tries - 1:
+                wait = int(e.headers.get("Retry-After") or (2 ** attempt))
+                time.sleep(min(wait, 60))
+                continue
+            # The body can quote the destination path; report the code only.
+            raise SystemExit("delete failed: HTTP %d after %d attempt(s)"
+                             % (e.code, attempt + 1))
+        except urllib.error.URLError:
+            if attempt < tries - 1:
+                time.sleep(2 ** attempt)
+                continue
+            raise SystemExit("delete failed: transport error after %d attempts" % tries)
+    raise SystemExit("delete failed: retries exhausted")
+
+
 def zip_write(zf, name, data):
     """One deterministic ZIP member with a portable path and permissions."""
     info = zipfile.ZipInfo(name.replace("\\", "/"), (1980, 1, 1, 0, 0, 0))
@@ -452,7 +487,7 @@ def main(argv=None):
                                  ensure_ascii=False).encode("utf-8")
         contents = tender_members(pack_files, pid, structures, entry_bytes)
 
-        # THE ARCHIVE FIRST, THE FOLDER AFTER, AND BOTH FROM `contents`.
+        # ARCHIVE, THEN FOLDER, THEN THE SIDECAR — both renderings from `contents`.
         #
         # The archive is one request whatever the tender weighs; the folder is one request
         # per file, and a day runs about forty documents per tender — so the folder is the
@@ -461,17 +496,30 @@ def main(argv=None):
         # readers: the archive is for taking a tender whole, the folder is for opening one
         # document without downloading the rest. `upload` retries and backs off, so the
         # cost is time, not loss.
+        #
+        # The folder is CLEARED before it is refilled. Delivery overwrites files and never
+        # removes them, and the flattened names are sequential — re-delivering a tender
+        # that shrank would otherwise keep documents no index names and the archive does
+        # not hold. The archive never had the problem: it is replaced whole.
+        #
+        # The sidecar goes after both renderings, because it points into both: an index a
+        # reader can see must describe files that are already there. Inside the folder the
+        # same rule holds again — `contents` ends with the tender's own index.json.
         archive_bytes = tender_archive(contents)
         upload(drive, "%s/%s" % (root, archive_name), archive_bytes, tok)
-        upload(drive, "%s/%s" % (root, index_name), entry_bytes, tok)
-        files += 2
-        bytes_sent += len(archive_bytes) + len(entry_bytes)
+        files += 1
+        bytes_sent += len(archive_bytes)
 
+        delete(drive, "%s/%s" % (root, pid), tok)
         for rel, data in contents:
             upload(drive, "%s/%s/%s" % (root, pid, rel), data, tok)
             files += 1
             bytes_sent += len(data)
         members += len(contents)
+
+        upload(drive, "%s/%s" % (root, index_name), entry_bytes, tok)
+        files += 1
+        bytes_sent += len(entry_bytes)
 
         index["tenders"].append(entry)
 

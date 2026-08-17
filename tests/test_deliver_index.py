@@ -112,8 +112,10 @@ class DeliveredStructure(unittest.TestCase):
             json.dump({"schema": "structure/1", "paragraphs": [{"index": 0, "numId": "7"}]}, fh)
         self.sent = []
         self._token, self._upload = deliver_graph.token, deliver_graph.upload
+        self._delete = deliver_graph.delete
         deliver_graph.token = lambda *a: "t"
         deliver_graph.upload = lambda drive, dest, data, tok: self.sent.append((dest, data))
+        deliver_graph.delete = lambda drive, dest, tok: False
         for k in ("GRAPH_DRIVE_ID", "GRAPH_CLIENT_ID", "GRAPH_CLIENT_SECRET"):
             os.environ[k] = "x"
         # Shaped like a real one, because the delivery now refuses a tenant id that is not
@@ -126,6 +128,7 @@ class DeliveredStructure(unittest.TestCase):
 
     def tearDown(self):
         deliver_graph.token, deliver_graph.upload = self._token, self._upload
+        deliver_graph.delete = self._delete
         shutil.rmtree(self.root, ignore_errors=True)
 
     def entries(self, pid="111", shard="1"):
@@ -170,9 +173,23 @@ class DeliveredIndex(unittest.TestCase):
             fh.write("111\n222\n")
 
         self.sent = []
+        self.cleared = []
+        self.order = []                       # one timeline: "del <dest>" / "put <dest>"
         self._token, self._upload = deliver_graph.token, deliver_graph.upload
+        self._delete = deliver_graph.delete
         deliver_graph.token = lambda *a: "t"
-        deliver_graph.upload = lambda drive, dest, data, tok: self.sent.append((dest, data))
+
+        def record_upload(drive, dest, data, tok):
+            self.sent.append((dest, data))
+            self.order.append("put " + dest)
+
+        def record_delete(drive, dest, tok):
+            self.cleared.append(dest)
+            self.order.append("del " + dest)
+            return False
+
+        deliver_graph.upload = record_upload
+        deliver_graph.delete = record_delete
         for k in ("GRAPH_DRIVE_ID", "GRAPH_CLIENT_ID", "GRAPH_CLIENT_SECRET"):
             os.environ[k] = "x"
         os.environ["GRAPH_TENANT_ID"] = "3b1f0a64-9c2e-4d5a-8f70-1e2d3c4b5a69"
@@ -180,6 +197,7 @@ class DeliveredIndex(unittest.TestCase):
 
     def tearDown(self):
         deliver_graph.token, deliver_graph.upload = self._token, self._upload
+        deliver_graph.delete = self._delete
         shutil.rmtree(self.root, ignore_errors=True)
 
     def deliver(self):
@@ -284,6 +302,33 @@ class DeliveredIndex(unittest.TestCase):
             prefix = "%s/%s/" % (base, pid)
             in_folder = [p for p in paths if p.startswith(prefix)]
             self.assertEqual(in_folder[-1], prefix + "index.json")
+
+    def test_the_folder_is_cleared_before_it_is_refilled(self):
+        # Delivery overwrites files and never removes them, and the flattened names are
+        # sequential — re-delivering a tender that shrank would otherwise keep documents no
+        # index names and the archive does not hold. Stale files were invisible to every
+        # other test here, because every other test delivers once.
+        self.deliver()
+        for pid in ("111", "222"):
+            folder = "%s/%s" % (self.base_path(), pid)
+            self.assertIn(folder, self.cleared)
+            first_into = next(i for i, e in enumerate(self.order)
+                              if e.startswith("put %s/" % folder))
+            self.assertLess(self.order.index("del " + folder), first_into)
+
+    def test_the_sidecar_index_arrives_after_both_renderings(self):
+        # It points into the archive and the folder alike, so it must exist only once both
+        # do — a reader must never hold an index to files still arriving.
+        paths = self.deliver()
+        for pid in ("111", "222"):
+            base = self.base_path()
+            sidecar = paths.index("%s/%s.index.json" % (base, pid))
+            self.assertLess(paths.index("%s/%s.zip" % (base, pid)), sidecar)
+            self.assertLess(paths.index("%s/%s/index.json" % (base, pid)), sidecar)
+
+    @staticmethod
+    def base_path():
+        return "dest/2026-08-11/shards/eis-batch-shard-1"
 
 
 if __name__ == "__main__":
