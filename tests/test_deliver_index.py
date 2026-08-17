@@ -114,9 +114,11 @@ class DeliveredStructure(unittest.TestCase):
         self._token, self._upload = deliver_graph.token, deliver_graph.upload
         deliver_graph.token = lambda *a: "t"
         deliver_graph.upload = lambda drive, dest, data, tok: self.sent.append((dest, data))
-        for k in ("GRAPH_DRIVE_ID", "GRAPH_TENANT_ID", "GRAPH_CLIENT_ID",
-                  "GRAPH_CLIENT_SECRET"):
+        for k in ("GRAPH_DRIVE_ID", "GRAPH_CLIENT_ID", "GRAPH_CLIENT_SECRET"):
             os.environ[k] = "x"
+        # Shaped like a real one, because the delivery now refuses a tenant id that is not
+        # — a live run died on a value that was some other secret entirely.
+        os.environ["GRAPH_TENANT_ID"] = "3b1f0a64-9c2e-4d5a-8f70-1e2d3c4b5a69"
         os.environ["GRAPH_DEST_ROOT"] = "dest"
         deliver_graph.main(["--packs", self.root, "--shard", "1", "--date", "2026-08-11"])
         self.paths = [d for d, _ in self.sent]
@@ -171,9 +173,9 @@ class DeliveredIndex(unittest.TestCase):
         self._token, self._upload = deliver_graph.token, deliver_graph.upload
         deliver_graph.token = lambda *a: "t"
         deliver_graph.upload = lambda drive, dest, data, tok: self.sent.append((dest, data))
-        for k in ("GRAPH_DRIVE_ID", "GRAPH_DEST_ROOT", "GRAPH_TENANT_ID",
-                  "GRAPH_CLIENT_ID", "GRAPH_CLIENT_SECRET"):
+        for k in ("GRAPH_DRIVE_ID", "GRAPH_CLIENT_ID", "GRAPH_CLIENT_SECRET"):
             os.environ[k] = "x"
+        os.environ["GRAPH_TENANT_ID"] = "3b1f0a64-9c2e-4d5a-8f70-1e2d3c4b5a69"
         os.environ["GRAPH_DEST_ROOT"] = "dest"
 
     def tearDown(self):

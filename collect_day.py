@@ -50,7 +50,7 @@ import urllib.parse
 import urllib.request
 import zipfile
 
-from deliver_graph import GRAPH, env, token, upload, upload_file
+from deliver_graph import GRAPH, env, graph_token, upload, upload_file
 
 
 def get(url, tok, tries=4):
@@ -266,7 +266,7 @@ def main(argv=None):
 
     drive = env("GRAPH_DRIVE_ID")
     base = env("GRAPH_DEST_ROOT").strip("/")
-    tok = token(env("GRAPH_TENANT_ID"), env("GRAPH_CLIENT_ID"), env("GRAPH_CLIENT_SECRET"))
+    tok = graph_token()
 
     day = collect(drive, base, args.date, args.shards, args.slices, args.run_id, tok)
     fd, archive_path = tempfile.mkstemp(prefix="eis_shards_", suffix=".zip")

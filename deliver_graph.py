@@ -42,6 +42,7 @@ import argparse
 import io
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -68,10 +69,46 @@ UPLOAD_CHUNK = 32 * 320 * 1024
 
 
 def env(name):
-    v = os.environ.get(name)
+    """One coordinate, or a refusal that names it. Surrounding whitespace is not a value.
+
+    A secret pasted into a web form or piped into `gh secret set` routinely arrives with a
+    trailing newline, and nothing downstream survives it: the newline lands in a URL and
+    the error is an `InvalidURL` from inside urllib, four frames deep, quoting a string the
+    log masks to `***`. The value is never printed here — only the name of the variable
+    holding it, which is the part the reader needs and the part that is not a secret.
+    """
+    v = (os.environ.get(name) or "").strip()
     if not v:
         sys.exit("missing environment: %s" % name)
     return v
+
+
+def coordinate(name, value, pattern=None):
+    """Refuse a coordinate that cannot be what it claims to be, naming the variable.
+
+    Whitespace INSIDE a value survives `strip`, and the two secrets most easily confused
+    here are a tenant id and a destination path — one a GUID, the other a folder name with
+    spaces in it. Swapped, the run dies in urllib with a masked string and no hint which of
+    six variables to look at. This is the check that turns twenty minutes of log reading
+    into one line.
+    """
+    if any(c.isspace() for c in value):
+        sys.exit("%s contains whitespace, so it cannot be used in a request. "
+                 "Check it is not another secret's value." % name)
+    if pattern and not pattern.match(value):
+        sys.exit("%s is not shaped like the value this expects. "
+                 "Check it is not another secret's value." % name)
+    return value
+
+
+TENANT = re.compile(r"^[0-9a-fA-F-]{36}$")
+
+
+def graph_token():
+    """The access token, from coordinates checked before they are spent on a request."""
+    return token(coordinate("GRAPH_TENANT_ID", env("GRAPH_TENANT_ID"), TENANT),
+                 coordinate("GRAPH_CLIENT_ID", env("GRAPH_CLIENT_ID")),
+                 env("GRAPH_CLIENT_SECRET"))
 
 
 def token(tenant, client_id, client_secret):
@@ -367,7 +404,7 @@ def main(argv=None):
 
     drive = env("GRAPH_DRIVE_ID")
     base = env("GRAPH_DEST_ROOT").strip("/")
-    tok = token(env("GRAPH_TENANT_ID"), env("GRAPH_CLIENT_ID"), env("GRAPH_CLIENT_SECRET"))
+    tok = graph_token()
 
     root = "%s/%s/shards/eis-batch-shard-%s" % (base, args.date, args.shard)
     files = bytes_sent = members = 0
