@@ -43,7 +43,9 @@ Requirements: Python 3.12, `pip install -r requirements.txt` (pinned exactly), p
 transport because it is what a runner has and its behaviour on a 400 MB download is the
 boring, well-understood one.
 
-## What comes out
+## What one tender looks like
+
+This is a pack as it sits on the runner, and as it sits inside the delivery below.
 
 ```
 pack/
@@ -53,14 +55,60 @@ pack/
   manifest.json       what was downloaded, with sha256 per file
   journal.jsonl       append-only progress — the resume point
   normalized/         one Markdown document per readable file, plus the audit list
-  llm/                optional: scans transcribed by a model, marked as such
+  llm/                what the decoder could not read, read anyway — local OCR by default,
+                      a hosted model only if one is configured. Marked `ocr-fallback` or
+                      `llm-fallback` per entry, never merged into `normalized/`, and not
+                      delivered: it stays in the pack and the run's artifact.
   summary.json        counts, bytes, digests
 ```
 
-What a consumer may rely on is the shape above plus `index.json`; the contract itself lives
-with the consumer, not here.
+The directory is named `llm/` for a lane that has not been model-first since Tesseract
+became its default. Renaming it would move paths the manifest already hands out, so the
+name stays and this note carries the correction.
 
-Which notices are worth fetching is not decided in this repository either. `EIS_POLICY`
+## What gets published
+
+A run delivers one day to a folder on a drive. This shape is the tool's own and is what a
+reader may rely on:
+
+```
+<date>/
+  day.json                    the list, and the proof the day is there to be read
+  shards.zip                  the whole day in one file: tender archives and sidecars
+  shards/
+    eis-batch-shard-N/
+      <pid>/                  the tender, open one document without downloading the rest
+        procurement.json        its facts, as above
+        manifest.json           what was downloaded, sha256 per file
+        normalized/             the Markdown
+        structure.json          Word numbering, when the tender had any
+        summary.json            counts, bytes, digests
+        index.json              what is here and what is worth opening — written LAST
+      <pid>.zip               the same tender, one request
+      <pid>.index.json        its index, without opening either
+      done.txt failed.txt resolved.tsv
+      index.json              every tender in this shard — written LAST
+```
+
+Every tender is published twice on purpose. The archive is one request whatever the tender
+weighs; the folder is one request per file, and a day runs about forty documents per
+tender, so the folder is the expensive half by roughly that factor. It is delivered anyway
+because the two serve different readers, and neither should have to pay the other's price.
+
+`shards.zip` carries the archives and the sidecars, not a second copy of the folders: a
+reader taking the whole day wants the bytes once.
+
+**An index that exists was written after everything it names.** That holds at both levels —
+inside a tender and across a shard — so a delivery that died halfway leaves documents
+without an index rather than an index that lies. `day.json` goes last of all, and a reader
+that lists folders instead of reading it will read the wrong day: delivery overwrites files
+and never removes folders, so a date fetched twice holds tenders from both runs and nothing
+in a folder says which run put it there.
+
+The shape above is this repository's contract. Which tender matters is not: no judgement is
+made here and none can be.
+
+Which notices are worth fetching is not decided here either. `EIS_POLICY`
 carries a caller's recall terms as JSON — see `cpv_policy.example.json` for the shape.
 Unset, nothing is filtered and every discovered notice is fetched.
 
