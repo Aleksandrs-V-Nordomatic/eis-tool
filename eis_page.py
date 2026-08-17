@@ -271,14 +271,28 @@ def parse_notice(page, pid):
         "buyer": buyer_name.strip() or None,
         "buyer_reg": buyer_reg.strip() or None,
         "iub_uuid": iub.group(1) if iub else None,
-        # No IUB link means the register does not carry this procurement, and that is all
-        # it means. It used to say the procurement therefore sits below the publication
-        # duty — i.e. that it is small. Measured over 169 collected pages: 43 are EIS-only,
-        # 9 of them publish a value, and 6 of those 9 are at or above 42,000 EUR — one at
-        # 3,590,000. Their median, 86,000, is the same as the median of the ones the
-        # register does carry. So this flag is a fact about coverage and nothing about
-        # size; 79% of EIS-only pages publish no value at all, so the page cannot settle it
-        # either way.
+        # WHAT THIS FLAG ACTUALLY SAYS: this page printed no hyperlink of the one shape
+        # `_IUB` matches. It does NOT say the register lacks the procurement, and it cannot
+        # — discovery reaches this page BY searching the register (`eis_tool.discover`), so
+        # everything the pipeline collects is in the register by construction.
+        #
+        # Measured over 169 collected pages, 43 come back flagged, and none of them is a
+        # procurement the register misses:
+        #
+        #   * 26 are market consultations. Their register publication is a planning
+        #     publication, served as
+        #     `https://eforms.pvs.iub.gov.lv/planning-publications/view/pil-discussion/<id>`
+        #     — a different host and a different path from the `eformsb…/show/<uuid>` this
+        #     regex knows. 26 of the 28 consultations collected are flagged; among
+        #     everything else the rate is 17 of 141.
+        #   * the rest print the field empty: the buyer left it blank on a procurement the
+        #     register carries anyway.
+        #
+        # It used to claim the opposite — that a missing link put the procurement below the
+        # publication duty, i.e. that it was small. Nothing measured that, and it cannot be
+        # measured from this corpus at all: a procurement genuinely absent from the register
+        # is never discovered, so none is here to look at. Enumerating those means walking
+        # EIS ids (`walk_ids`, present and unused).
         "eis_only": iub is None,
         "link": PAGE % pid,
         "source": "EIS",
