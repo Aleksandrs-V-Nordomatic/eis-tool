@@ -230,7 +230,7 @@ def build_shards_archive(drive, base, date, shards, tok, out_path):
                 raise SystemExit("archive assembly failed: shard %d index is invalid" % n)
 
             prefix = "shards/eis-batch-shard-%d" % n
-            for name in ("done.txt", "failed.txt", "resolved.tsv"):
+            for name in ("done.txt", "failed.txt", "withdrawn.txt", "resolved.tsv"):
                 data = bytes_at(drive, "%s/%s" % (root, name), tok)
                 if data is not None:
                     archive_member(zf, "%s/%s" % (prefix, name), data)

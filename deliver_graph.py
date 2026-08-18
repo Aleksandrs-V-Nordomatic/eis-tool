@@ -60,7 +60,7 @@ KEEP_NAMES = {
     "manifest.json", "summary.json", "procurement.json",
     "manifest_normalized.json", "document.md",
     "structure.json",
-    "done.txt", "failed.txt", "resolved.tsv",
+    "done.txt", "failed.txt", "withdrawn.txt", "resolved.tsv",
 }
 SIMPLE_UPLOAD_LIMIT = 4 * 1024 * 1024
 # Microsoft Graph requires non-final upload fragments to be a multiple of 320 KiB.
@@ -446,7 +446,7 @@ def main(argv=None):
 
     # The shard's own arithmetic rides at the top, beside the packs, exactly as it sits in
     # the artifact: `collect` reads it to prove a whole day arrived.
-    for name in ("done.txt", "failed.txt", "resolved.tsv"):
+    for name in ("done.txt", "failed.txt", "withdrawn.txt", "resolved.tsv"):
         p = os.path.join(args.packs, name)
         if os.path.exists(p):
             with open(p, "rb") as fh:

@@ -142,6 +142,7 @@ jobs:
             packs/*/llm/**
             packs/done.txt
             packs/failed.txt
+            packs/withdrawn.txt
             packs/resolved.tsv
           retention-days: 14
 
