@@ -195,6 +195,52 @@ class EnglishPage(unittest.TestCase):
         self.assertTrue(eis_page.is_published(ENGLISH_PAGE))
 
 
+class AccessDenied(unittest.TestCase):
+    """EIS's fixed answer for an id with no stage a guest may see — not a draft, not a throttle.
+
+    Measured on EIS 179817 and 179872, 2026-08-18: `eis_fetch`'s retry loop spent its whole
+    five-minute, six-attempt budget on this page before giving up, because it reads exactly
+    like the ordinary "not published yet" case to a check that only asks what the page is
+    not. This is what the page actually is — served at `/EKEIS/Error.html`, instantly, every
+    time — and the fixture below is that page, trimmed.
+    """
+
+    PAGE = (
+        '<html><head><title>Kļūda / Error</title></head><body>'
+        '<h1>Pieeja liegta / Access Denied</h1>'
+        '<p>Objekts, kuru vēlaties atvērt, neeksistē vai ir mainījies tā statuss, vai arī '
+        'šobrīd Jums nav piekļuves tiesību šim objektam.</p>'
+        '<p>The object you\'ve tried to access doesn\'t exist or its status has changed, or '
+        'either you don\'t have permission to access this object at this time.</p>'
+        '<p><b>Kļūdas paziņojums:</b> Iepirkumam jābūt vismaz vienam lietotājam attēlojamam '
+        'Iepirkuma posmam, lai varētu attēlot tā datus</p>'
+        '</body></html>'
+    )
+
+    def test_the_access_denied_page_is_recognised(self):
+        self.assertTrue(eis_page.is_access_denied(self.PAGE))
+
+    def test_it_is_not_read_as_a_published_procurement(self):
+        # The two checks must not both say yes to the same page — a caller branches on
+        # exactly one of them being true.
+        self.assertFalse(eis_page.is_published(self.PAGE))
+
+    def test_a_published_page_is_not_mistaken_for_access_denied(self):
+        self.assertFalse(eis_page.is_access_denied(PAGE))
+        self.assertFalse(eis_page.is_access_denied(ENGLISH_PAGE))
+
+    def test_the_ordinary_redirect_stub_is_not_this_either(self):
+        # A genuinely unpublished id's 302 stub and this fixed error page are two different
+        # things EIS serves for two different reasons; neither check should claim the other.
+        stub = ('<html><head><title>Object moved</title></head>'
+                '<body><h2>Object moved to <a href="/">here</a>.</h2></body></html>')
+        self.assertFalse(eis_page.is_access_denied(stub))
+
+    def test_empty_and_none_are_not_access_denied(self):
+        self.assertFalse(eis_page.is_access_denied(""))
+        self.assertFalse(eis_page.is_access_denied(None))
+
+
 class ParseNotice(unittest.TestCase):
     def setUp(self):
         self.notice = eis_page.parse_notice(PAGE, "178345")

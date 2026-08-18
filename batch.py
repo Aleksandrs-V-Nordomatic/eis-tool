@@ -287,6 +287,10 @@ def run(targets, out, llm_max_files=None, workers=1, sections=None, uuids=None):
     # line a caller can only match by counting -- which is also wrong the moment two
     # notices turn out to be one procurement.
     resolved = []
+    # EIS's own "no displayable stage" answer, kept apart from `failed`: the id was checked
+    # and answered, not left in doubt, and a caller should neither retry it nor read its
+    # presence as the run coming back short. See `eis_fetch.Withdrawn`.
+    withdrawn = []
     lock = threading.Lock()
 
     def consume():
@@ -330,6 +334,12 @@ def run(targets, out, llm_max_files=None, workers=1, sections=None, uuids=None):
             # produced.
             eis_fetch.fetch(url, pack, sections,
                             register_uuid=(uuids or {}).get(target) or (uuids or {}).get(url))
+        except eis_fetch.Withdrawn as exc:
+            # Caught ahead of the plain `Fail` it subclasses: this id is settled, not
+            # outstanding, so it is recorded apart and never repeated back as a gap.
+            withdrawn.append("%s — %s" % (url, str(exc)[:200]))
+            say("  WITHDRAWN %s — %s" % (pid, str(exc)[:100]))
+            continue
         except eis_fetch.Fail as exc:
             failed.append("%s — %s" % (url, str(exc)[:200]))
             say("  FAILED %s — %s" % (pid, str(exc)[:100]))
@@ -353,13 +363,17 @@ def run(targets, out, llm_max_files=None, workers=1, sections=None, uuids=None):
         fh.write("\n".join(sorted(done)) + ("\n" if done else ""))
     with open(os.path.join(out, "failed.txt"), "w", encoding="utf-8") as fh:
         fh.write("\n".join(failed) + ("\n" if failed else ""))
+    # Its own file, not a section of failed.txt: a reader greping failed.txt for outstanding
+    # work should not have to also know which lines are settled and which are not.
+    with open(os.path.join(out, "withdrawn.txt"), "w", encoding="utf-8") as fh:
+        fh.write("\n".join(withdrawn) + ("\n" if withdrawn else ""))
     # "<what was asked>\t<EIS id, or - when nothing was behind it>", one line
     # per target, in the order asked. Additive: done.txt and failed.txt are untouched.
     with open(os.path.join(out, "resolved.tsv"), "w", encoding="utf-8") as fh:
         fh.write("".join("%s\t%s\n" % pair for pair in resolved))
-    say("batch · %d read · %d failed · %.1f min total"
-        % (len(done), len(failed), (time.time() - started) / 60.0))
-    return done, failed
+    say("batch · %d read · %d failed · %d withdrawn · %.1f min total"
+        % (len(done), len(failed), len(withdrawn), (time.time() - started) / 60.0))
+    return done, failed, withdrawn
 
 
 def main(argv=None):
@@ -401,9 +415,12 @@ def main(argv=None):
     else:
         say("batch of %d target(s)" % len(targets))
     sections = eis_fetch.SECTIONS[:1] if args.skip_archive else None
-    done, failed = run(targets, args.out, args.llm_max_files, sections=sections, uuids=uuids)
+    done, failed, withdrawn = run(targets, args.out, args.llm_max_files, sections=sections,
+                                  uuids=uuids)
     # A tender that could not be fetched is recorded, not fatal: the run still delivered
     # everything else, and a caller that treated this as total failure would throw it away.
+    # A tender EIS itself says has nothing to show is weaker still: `failed` alone decides
+    # this, so a shard whose whole slice turned out withdrawn exits 0 — settled, not short.
     return 0 if done else (1 if failed else 0)
 
 

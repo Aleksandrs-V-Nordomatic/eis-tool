@@ -64,6 +64,29 @@ def is_published(page):
         return True
     return any(mark in page for mark in PUBLISHED_MARKERS)
 
+
+# A THIRD ANSWER, NOT A SLOWER PATH TO ONE OF THE OTHER TWO.
+#
+# `is_published` distinguishes "this is the tender" from "this is not, yet" — and the caller
+# reasonably retries the second, because a draft becomes visible and a throttle passes. EIS
+# answers some ids with neither: a fixed page at its own path, `/EKEIS/Error.html`, saying
+# the procurement has no stage a guest may see at all. That is not a draft warming up and
+# not a throttle cooling down — the message is the platform's own explanation, chosen and
+# served instantly, not a timeout. Six more attempts spend five minutes proving what the
+# first answer already said.
+#
+# The heading is bilingual on one line, `Pieeja liegta / Access Denied`, which is EIS's own
+# fixed template for this state rather than a phrase this project chose — the same
+# language-proof reasoning `is_published` already relies on. Measured on EIS 179817 and
+# 179872, 2026-08-18: both notices, both answering instantly with this page on every draw,
+# never once returning a procurement.
+ACCESS_DENIED_MARKERS = ("Pieeja liegta / Access Denied",)
+
+
+def is_access_denied(page):
+    """EIS's own 'no displayable stage' page — permanent, and not this tool's failure."""
+    return bool(page) and any(mark in page for mark in ACCESS_DENIED_MARKERS)
+
 # Attribute-aware on purpose. The obvious `<label[^>]*for="([^"]*)"[^>]*>` breaks the moment
 # an attribute value contains a `>` — a tooltip written as `title="<div>help</div>"` ends the
 # tag early, and the "label" then captured is the help text. That failure is silent: the field

@@ -106,6 +106,16 @@ class Fail(Exception):
     """Anything that must stop the run. There is no partial success."""
 
 
+class Withdrawn(Fail):
+    """EIS itself says there is nothing here — not this tool failing to reach it.
+
+    A caller counts this apart from an ordinary `Fail`: the id was checked, EIS answered
+    instantly and structurally (`eis_page.is_access_denied`), and the answer was no stage a
+    guest may see. That is a fact about the notice, not evidence the fetch should be retried
+    or that the run is incomplete for lacking it.
+    """
+
+
 def _describe(html):
     """Say what page EIS actually served, in one line, so a log is enough to diagnose it."""
     title = re.search(r"<title[^>]*>(.*?)</title>", html, re.S | re.I)
@@ -452,6 +462,15 @@ def fetch(url, out_dir, sections=None, register_uuid=None):
             last, html = str(exc), ""
         if eis_page.is_published(html):
             break
+        if html and eis_page.is_access_denied(html):
+            # Not "not yet" — EIS's own fixed answer for no stage a guest may see. Retrying
+            # would spend the remaining five attempts (five minutes) re-asking a question
+            # already answered; raise now, and as the distinct type a caller sorts apart
+            # from an ordinary fetch failure.
+            raise Withdrawn(
+                "%s: EIS answered with its own 'Access Denied — no displayable stage' page. "
+                "This is not a fetch failure: the notice has nothing a guest may see, and no "
+                "further attempt would change that." % page_url)
         if html:
             # EIS answered with a real page that is not a procurement. Keeping it is the
             # difference between diagnosing the next failure and guessing at it, which has

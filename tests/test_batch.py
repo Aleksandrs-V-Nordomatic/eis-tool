@@ -78,7 +78,7 @@ class Pipeline(unittest.TestCase):
         batch.post_process = rec.post
         targets = ["https://www.eis.gov.lv/EKEIS/Supplier/Procurement/%d" % (100 + i)
                    for i in range(n)]
-        done, failed = batch.run(targets, self.out)
+        done, failed, _withdrawn = batch.run(targets, self.out)
         return rec, done, failed
 
     def test_reading_happens_while_the_next_tender_downloads(self):
@@ -114,7 +114,7 @@ class Pipeline(unittest.TestCase):
         batch.post_process = explode
         targets = ["https://www.eis.gov.lv/EKEIS/Supplier/Procurement/%d" % (100 + i)
                    for i in range(4)]
-        done, failed = batch.run(targets, self.out)
+        done, failed, _withdrawn = batch.run(targets, self.out)
         self.assertEqual(len(done), 3)
         self.assertTrue(any("102" in f for f in failed), failed)
 
@@ -127,6 +127,57 @@ class Pipeline(unittest.TestCase):
         with open(os.path.join(self.out, "failed.txt"), encoding="utf-8") as fh:
             failed = [l for l in fh.read().splitlines() if l]
         self.assertEqual(len(done) + len(failed), 4)
+
+
+class WithdrawnTenders(unittest.TestCase):
+    """EIS's own 'no displayable stage' answer is a fact about the notice, not a gap.
+
+    `eis_fetch.Withdrawn` is a `Fail` a caller can tell apart from an ordinary one: the id
+    was checked and EIS answered instantly and structurally, so retrying is pointless and
+    counting it as missing work is wrong. It must land apart from `failed` — that is the
+    whole reason `main()`'s exit rule (`0 if done else (1 if failed else 0)`) can call a
+    shard that is entirely withdrawn a clean run instead of a short one.
+    """
+
+    def _run_raising(self, exc_cls, n=2):
+        out = tempfile.mkdtemp(prefix="eis_withdrawn_")
+        self.addCleanup(shutil.rmtree, out, True)
+        old_fetch, old_post = batch.eis_fetch.fetch, batch.post_process
+
+        def fetch(url, pack, sections=None, register_uuid=None):
+            raise exc_cls("EIS answered with its own 'Access Denied' page")
+
+        self.addCleanup(lambda: setattr(batch.eis_fetch, "fetch", old_fetch))
+        self.addCleanup(lambda: setattr(batch, "post_process", old_post))
+        batch.eis_fetch.fetch = fetch
+        batch.post_process = lambda pack, llm_max_files=None: None
+        targets = ["https://www.eis.gov.lv/EKEIS/Supplier/Procurement/%d" % (200 + i)
+                   for i in range(n)]
+        return out, batch.run(targets, out)
+
+    def test_a_withdrawn_tender_is_recorded_apart_from_a_failure(self):
+        _out, (done, failed, withdrawn) = self._run_raising(batch.eis_fetch.Withdrawn)
+        self.assertEqual(done, [])
+        self.assertEqual(failed, [])
+        self.assertEqual(len(withdrawn), 2)
+
+    def test_a_shard_that_is_entirely_withdrawn_still_exits_clean(self):
+        _out, (done, failed, _withdrawn) = self._run_raising(batch.eis_fetch.Withdrawn)
+        self.assertEqual(0 if done else (1 if failed else 0), 0)
+
+    def test_withdrawn_lands_in_its_own_file_not_inside_failed_txt(self):
+        out, (_done, _failed, withdrawn) = self._run_raising(batch.eis_fetch.Withdrawn)
+        with open(os.path.join(out, "failed.txt"), encoding="utf-8") as fh:
+            self.assertEqual(fh.read(), "")
+        with open(os.path.join(out, "withdrawn.txt"), encoding="utf-8") as fh:
+            lines = [l for l in fh.read().splitlines() if l]
+        self.assertEqual(len(lines), len(withdrawn))
+        self.assertEqual(len(lines), 2)
+
+    def test_an_ordinary_failure_is_unaffected(self):
+        _out, (_done, failed, withdrawn) = self._run_raising(batch.eis_fetch.Fail)
+        self.assertEqual(len(failed), 2)
+        self.assertEqual(withdrawn, [])
 
 
 class Targets(unittest.TestCase):
