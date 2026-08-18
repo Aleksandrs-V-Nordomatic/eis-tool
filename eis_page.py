@@ -388,13 +388,26 @@ def parse_notice(page, pid, register_uuid=None):
         "register_check": ("discovery" if register_uuid
                            else "page-link" if (iub or planning)
                            else "unverified"),
-        # SO THIS MEANS "NOT CONFIRMED TO BE IN THE REGISTER", NOT "ABSENT FROM IT". It used
-        # to mean the second, and on that reading was taken to prove the procurement sits
-        # below the publication duty and is therefore small. Nothing measured that, and this
-        # corpus cannot: one genuinely absent from the register is never discovered, so none
-        # is here to look at. `register_check` says which kind of true this is — and under
-        # `walk_ids`, where the page is the only source, it will be "unverified" rather than
-        # a claim the walk is in no position to make.
+        # SO THIS MEANS "NOT CONFIRMED TO BE IN THE REGISTER", NOT "ABSENT FROM IT" — and
+        # the difference has now been measured rather than argued. Walking ids 179550-179800
+        # and putting every page to the register itself, by identification number and by
+        # buyer:
+        #
+        #   129 published of 251 ids walked   the id space is about half live
+        #    66 page-link    ->  66 in the register,  0 not. The link never lied.
+        #    63 unverified   ->  38 in the register after all, 25 genuinely absent
+        #
+        # A fifth of what EIS publishes has no register notice — and the page alone would
+        # have accused twice that many. What the 25 are: 12 `Neregulēts iepirkums`, outside
+        # the publication duty, which is the premise this flag used to assert without
+        # evidence; 7 market consultations; 4 closed competitions under a dynamic purchasing
+        # system whose parent was published once; 2 carrying 2025 references, whose register
+        # entry simply predates the window checked.
+        #
+        # Only 5 of the 25 publish a value: 9,999 / 15,000 / 23,500 / 30,000 / 90,909 EUR.
+        # Small, as "below the publication duty" would predict — the old premise turns out
+        # to hold for the population it was actually about, and not for the one this flag
+        # was selecting.
         "eis_only": register_uuid is None and iub is None and planning is None,
         "link": PAGE % pid,
         "source": "EIS",

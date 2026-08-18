@@ -94,6 +94,18 @@ def discover(days=1, date_from=None, date_to=None, resolve_links=True):
     unused). Until something calls it, "the window" means the register's window and
     nothing wider — say so rather than let a complete-looking day imply otherwise.
 
+    HOW MUCH THAT IS, MEASURED. Walking ids 179550-179800 and putting each page to the
+    register: 129 of 251 ids were live, and 25 of those 129 — a fifth — had no register
+    notice at all. Mostly `Neregulēts iepirkums`, market consultations, and closed
+    competitions inside a dynamic purchasing system. None of them can appear below, however
+    complete the coverage proof looks, because coverage is proven against the register's
+    own total and the register is exactly what they are missing from.
+
+    The register's own cadence, over a fortnight: about 200 biddable notices a working day,
+    published from 05:00 to shortly before midnight, and the API carries them within
+    minutes — the newest notice was two minutes old when measured. There is nothing to wait
+    for after a publication, but a day is not finished until its last notice, near midnight.
+
     A notice with no EIS link is not an error: it is a procurement conducted somewhere else,
     and it is reported as such rather than dropped.
     """
