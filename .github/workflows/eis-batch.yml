@@ -34,19 +34,19 @@ on:
   workflow_dispatch:
     inputs:
       days:
-        description: "Ask for a period: notices published in the last N days (ignored if targets is filled)"
+        description: "A window ending TODAY: 1 is today alone, 2 is today and yesterday. Used only when neither dates nor targets are given"
         required: false
         default: "1"
       date_from:
-        description: "Optional exact publication start date, YYYY-MM-DD"
+        description: "Publication start date, YYYY-MM-DD. Alone it means from then until TODAY — for one day give date_to as well. Combines with targets"
         required: false
         default: ""
       date_to:
-        description: "Optional exact publication end date, YYYY-MM-DD"
+        description: "Publication end date, YYYY-MM-DD. Set it equal to date_from to ask for exactly that one day. Combines with targets"
         required: false
         default: ""
       targets:
-        description: "Or name them: EIS URLs, procurement ids or IUB notice uuids, one per line"
+        description: "Name them: EIS URLs, procurement ids or IUB notice uuids, one per line. Added to the window above, deduplicated"
         required: false
       shards:
         description: "How many runners split the list. Each gets its own address and its own gentle pace"

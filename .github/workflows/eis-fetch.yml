@@ -1,6 +1,6 @@
 name: eis-fetch
 
-# The egress worker. Claude's sandbox has no outbound HTTPS; a runner does. Changing the
+# The egress worker. The consumer's sandbox has no outbound HTTPS; a runner does. Changing
 # URL in eis_request.txt is the whole trigger — one line, one tender, one artifact.
 on:
   push:

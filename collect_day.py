@@ -4,21 +4,21 @@
 
     python3 collect_day.py --date 2026-08-11 --shards 4 --slices 4 --run-id 31478237531
 
-DELIVERY SHAPE. `day.json` stays beside `shards/` and `shards.zip`. Each shard folder holds
-every tender twice — as `<pid>/`, which can be opened one document at a time, and as
-`<pid>.zip`, which is one request for the whole tender — plus the small index sidecars and
-the shard-level accounting files.
+DELIVERY SHAPE. `day.json` and `changes.json` sit beside `shards/`. Each shard folder holds
+its index and its own accounting files — not the tenders themselves, which live in
+`tenders/<pid>/` and are addressed from here. The day folder holds no tender bytes at all.
 
-`shards.zip` carries the archives and the sidecars, NOT a second copy of the unpacked
-folders: a reader taking the whole day wants it once, and mirroring the folders as well
-would roughly double a file that is already tens of megabytes. So the folders are for
-looking, the ZIP is for taking, and neither is a subset of the other by accident.
+TWO FILES, TWO QUESTIONS. `day.json` answers "which tenders does this day contain, and where
+is each one" — the list, balanced into slices, with a drive address per tender. `changes.json`
+answers "what actually moved", which is the question a consumer that has read this day's
+tenders before is really asking, and on most days it is a far shorter answer.
 
 WHY THIS EXISTS. A reader that lists folders to find its work reads the wrong day. Delivery
-overwrites files and never removes folders, so a date fetched twice holds tenders from both
-runs: a shard can hold more tender folders than its own `done.txt` names, and one tender's
-`summary.json` can return two different digests on the same path an hour apart. Nothing in a
-folder says which run put it there. This file is the list that does.
+overwrites files and never removes them, so a date fetched twice holds change records from
+both runs: a shard folder can name more tenders than its own `done.txt` does, and nothing in
+the folder says which run put a record there. This file is the list that does, and it is the
+only place that does: a tender's home is shared by every day that ever touched it, so nothing
+else states that a particular day fetched a particular tender.
 
 WHAT IT READS. Not the packs on this runner — the shards' own `index.json` **as delivered**,
 through the same Graph drive the reader will use. So `day.json` describes what arrived, not
@@ -41,65 +41,13 @@ never travels through this repository.
 
 import argparse
 import json
-import os
 import sys
-import tempfile
 import time
-import urllib.error
-import urllib.parse
-import urllib.request
-import zipfile
 
-from deliver_graph import GRAPH, env, graph_token, upload, upload_file
-
-
-def get(url, tok, tries=4):
-    """One GET, retried on the codes Graph returns under load. Returns the body as bytes."""
-    for attempt in range(tries):
-        req = urllib.request.Request(url)
-        req.add_header("Authorization", "Bearer " + tok)
-        try:
-            with urllib.request.urlopen(req, timeout=120) as r:
-                return r.read()
-        except urllib.error.HTTPError as e:
-            if e.code == 404:
-                return None
-            if e.code in (429, 500, 502, 503, 504) and attempt < tries - 1:
-                wait = int(e.headers.get("Retry-After") or (2 ** attempt))
-                time.sleep(min(wait, 60))
-                continue
-            raise SystemExit("read failed: HTTP %d after %d attempt(s)" % (e.code, attempt + 1))
-        except urllib.error.URLError:
-            if attempt < tries - 1:
-                time.sleep(2 ** attempt)
-                continue
-            raise SystemExit("read failed: transport error after %d attempts" % tries)
-    raise SystemExit("read failed: retries exhausted")
-
-
-def escaped(path):
-    return "/".join(urllib.parse.quote(p, safe="") for p in path.split("/"))
-
-
-def item_at(drive, path, tok):
-    """The drive item at `path`, or None. Its `id` is half of the address a reader needs."""
-    body = get("%s/drives/%s/root:/%s" % (GRAPH, drive, escaped(path)), tok)
-    return json.loads(body.decode("utf-8")) if body else None
-
-
-def json_at(drive, path, tok):
-    body = get("%s/drives/%s/root:/%s:/content" % (GRAPH, drive, escaped(path)), tok)
-    return json.loads(body.decode("utf-8")) if body else None
-
-
-def text_at(drive, path, tok):
-    body = get("%s/drives/%s/root:/%s:/content" % (GRAPH, drive, escaped(path)), tok)
-    return body.decode("utf-8") if body else ""
-
-
-def bytes_at(drive, path, tok):
-    """Binary content at a Graph path, or None."""
-    return get("%s/drives/%s/root:/%s:/content" % (GRAPH, drive, escaped(path)), tok)
+# The Graph layer lives in one module, beside the delivery that writes through it. This file
+# only ever reads, but reading is not a second dialect of the same protocol and two copies of
+# the retry policy would drift the first time either was corrected.
+from deliver_graph import env, graph_token, item_at, json_at, text_at, upload
 
 
 def uri(drive, item):
@@ -128,8 +76,9 @@ def balance(tenders, slices):
 
 
 def collect(drive, base, date, shards, slices, run_id, tok):
-    """Read every shard's delivered index and turn it into one list."""
-    present, missing, lost, tenders = [], [], [], []
+    """Read every shard's delivered index and turn it into one list, and one diff."""
+    present, missing, lost, tenders, moves, stale = [], [], [], [], [], []
+    expected, excused, resolved = set(), set(), {}
 
     for n in range(1, shards + 1):
         root = "%s/%s/shards/eis-batch-shard-%d" % (base, date, n)
@@ -137,7 +86,26 @@ def collect(drive, base, date, shards, slices, run_id, tok):
         if not index:
             missing.append(n)
             continue
+        # AN INDEX FROM AN EARLIER RUN IS NOT THIS RUN'S SHARD. The day folder outlives the
+        # run that filled it, so a date fetched twice keeps the first run's indexes; a shard
+        # that died mid-delivery this time is otherwise counted present on the strength of
+        # them, and the day calls itself complete while missing a quarter of its tenders.
+        # Only compared when both sides name a run — a hand-run delivery names none, and
+        # refusing its index would make the check itself the thing that loses a day.
+        if run_id and index.get("run_id") and str(index["run_id"]) != str(run_id):
+            stale.append(n)
+            missing.append(n)
+            continue
         present.append(n)
+
+        # What the whole day was asked for, as this shard saw it, and what it could not
+        # deliver of its own slice. Unioned across shards because each one walks the register
+        # for itself and they do not always agree.
+        accounts = index.get("accounts") or {}
+        expected.update(accounts.get("targets") or ())
+        excused.update(accounts.get("failed") or ())
+        excused.update(accounts.get("withdrawn") or ())
+        resolved.update(accounts.get("resolved") or {})
 
         for line in text_at(drive, "%s/failed.txt" % root, tok).splitlines():
             if line.strip():
@@ -147,21 +115,34 @@ def collect(drive, base, date, shards, slices, run_id, tok):
             pid = str(entry.get("pid") or "")
             if not pid:
                 continue
+            # THE ADDRESSES ARE THE TENDER'S HOME, NOT THIS DAY'S FOLDER. A day names which
+            # tenders moved; the tender itself lives in one place and is complete there
+            # whether it was first fetched this morning or four months ago.
+            home = entry.get("home") or "tenders/%s" % pid
             archive_name = entry.get("archive") or "%s.zip" % pid
-            index_name = entry.get("index_file") or "%s.index.json" % pid
-            archive_item = item_at(drive, "%s/%s" % (root, archive_name), tok)
-            index_item = item_at(drive, "%s/%s" % (root, index_name), tok)
+            index_name = entry.get("index_file") or "index.json"
+            archive_item = item_at(drive, "%s/%s/%s" % (base, home, archive_name), tok)
+            index_item = item_at(drive, "%s/%s/%s" % (base, home, index_name), tok)
             archive_uri = uri(drive, archive_item)
+            change = entry.get("change") or {}
+            # WHERE THIS DAY'S RECORD FOR THIS TENDER LIVES, WHICH IS IN THE TENDER. The day
+            # itself carries every record inline, here and in the shard index, so the only
+            # copy written as a file of its own is the one indexed beside the procurement.
+            run_path = "%s/%s" % (home, entry.get("run_file") or "runs/%s.json" % date)
+            moves.append(dict(change, pid=pid, shard=n, path=run_path))
             tenders.append({
                 "pid": pid,
                 "key": entry.get("key") or "EIS:%s" % pid,
                 "title": entry.get("title"),
                 "shard": n,
-                "path": "%s/shards/eis-batch-shard-%d/%s" % (date, n, archive_name),
+                # What this day did to the tender. A consumer that has read it before can
+                # stop here on "unchanged" without opening anything at all.
+                "status": entry.get("status") or change.get("status"),
+                "run_path": run_path,
+                "path": "%s/%s" % (home, archive_name),
                 # The same tender unpacked, for a reader that wants one document rather
                 # than the whole thing. Named here so nobody has to guess it exists.
-                "folder_path": "%s/shards/eis-batch-shard-%d/%s"
-                               % (date, n, entry.get("folder") or pid),
+                "folder_path": home,
                 "uri": archive_uri,
                 "archive_uri": archive_uri,
                 "index_uri": uri(drive, index_item),
@@ -177,83 +158,82 @@ def collect(drive, base, date, shards, slices, run_id, tok):
     for t in tenders:
         unique[t["pid"]] = t
     tenders = sorted(unique.values(), key=lambda t: t["pid"])
+    moved = {}
+    for m in moves:
+        moved[m["pid"]] = m
+    moves = sorted(moved.values(), key=lambda m: m["pid"])
+
+    # A TARGET NOBODY FETCHED. The shards divide the day by each computing the same plan from
+    # a list each walks the register for itself, and one notice weighed differently by one of
+    # them reshuffles a large part of the assignment: measured at ninety assignments covering
+    # sixty-eight tenders out of ninety-three targets, with the day calling itself complete.
+    # Subtracting what was delivered and what the shards reported as failed or withdrawn
+    # leaves the tenders that fell between the slices.
+    # A uuid this shard never owned is still in its target list under the name it was asked
+    # by; the shard that did own it published what that resolved to. Normalising with the
+    # union keeps a target from being counted missing because two shards spelled it
+    # differently.
+    named = lambda k: resolved.get(k, k)
+    expected = {named(k) for k in expected}
+    excused = {named(k) for k in excused}
+    unaccounted = sorted(expected - excused - {"eis:%s" % t["pid"] for t in tenders})
 
     bins = balance(tenders, slices)
+    by_status = {}
+    for t in tenders:
+        by_status[t.get("status") or "unknown"] = by_status.get(t.get("status") or "unknown", 0) + 1
 
-    return {
+    # THE DAY'S DIFF, AS ONE FILE. This is what a consumer reads to decide whether to open
+    # anything: every tender the day touched, what moved about it, and where it lives. A day
+    # on which two deadlines shifted is a few kilobytes here and nothing else worth fetching.
+    changes = {
+        "schema": "day-changes/1",
+        "date": date,
+        "run_id": run_id,
+        "written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "complete": not missing and not unaccounted,
+        "shards_missing": missing,
+        "shards_stale": stale,
+        "unaccounted": unaccounted,
+        "counts": dict(by_status, tenders=len(moves)),
+        "tenders": moves,
+    }
+
+    day = {
         "schema": "day/1",
         "date": date,
         "shards_path": "%s/shards" % date,
-        "shards_archive_path": "%s/shards.zip" % date,
-        "shards_archive_uri": None,
+        # The same list one level down, and the file to read first. Named here so a consumer
+        # holding day.json never has to guess that the diff exists.
+        "changes_path": "%s/changes.json" % date,
+        "tenders_path": "tenders",
         "run_id": run_id,
         "written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "complete": not missing,
+        # Whole means every shard delivered AND every target the shards named reached the
+        # day. A day short by a quarter used to satisfy the first alone.
+        "complete": not missing and not unaccounted,
+        "coverage": {"targets": len(expected), "delivered": len(tenders),
+                     "excused": len(expected & excused), "unaccounted": unaccounted},
         "shards_expected": shards,
         "shards_present": present,
         "shards_missing": missing,
+        # Named apart from the merely absent: a stale index means an earlier run of this date
+        # left one behind, which reads very differently from a shard that never ran.
+        "shards_stale": stale,
         "slices": slices,
-        "counts": {
-            "tenders": len(tenders),
-            "documents": sum(t["documents"] for t in tenders),
-            "chars": sum(t["chars"] for t in tenders),
-            "unreadable": sum(t["unreadable"] for t in tenders),
-        },
+        "counts": dict(
+            by_status,
+            tenders=len(tenders),
+            documents=sum(t["documents"] for t in tenders),
+            chars=sum(t["chars"] for t in tenders),
+            unreadable=sum(t["unreadable"] for t in tenders),
+        ),
         "slice_load": [{"slice": b["slice"], "tenders": len(b["pids"]), "chars": b["chars"]}
                        for b in bins],
         "lost": lost,
         "tenders": tenders,
     }
-
-
-def archive_member(zf, name, data):
-    """One deterministic member; nested ZIPs are stored rather than recompressed."""
-    info = zipfile.ZipInfo(name.replace("\\", "/"), (1980, 1, 1, 0, 0, 0))
-    info.compress_type = zipfile.ZIP_STORED if name.endswith(".zip") else zipfile.ZIP_DEFLATED
-    info.external_attr = 0o644 << 16
-    zf.writestr(info, data)
-
-
-def build_shards_archive(drive, base, date, shards, tok, out_path):
-    """Mirror the delivered `shards/` folder into one `shards.zip`."""
-    files = 0
-    with zipfile.ZipFile(out_path, "w", allowZip64=True) as zf:
-        for n in range(1, shards + 1):
-            root = "%s/%s/shards/eis-batch-shard-%d" % (base, date, n)
-            index_path = "%s/index.json" % root
-            index_bytes = bytes_at(drive, index_path, tok)
-            if index_bytes is None:
-                continue
-            try:
-                index = json.loads(index_bytes.decode("utf-8"))
-            except (UnicodeDecodeError, ValueError):
-                raise SystemExit("archive assembly failed: shard %d index is invalid" % n)
-
-            prefix = "shards/eis-batch-shard-%d" % n
-            for name in ("done.txt", "failed.txt", "withdrawn.txt", "resolved.tsv"):
-                data = bytes_at(drive, "%s/%s" % (root, name), tok)
-                if data is not None:
-                    archive_member(zf, "%s/%s" % (prefix, name), data)
-                    files += 1
-
-            for entry in index.get("tenders", []):
-                pid = str(entry.get("pid") or "")
-                if not pid:
-                    continue
-                names = (entry.get("archive") or "%s.zip" % pid,
-                         entry.get("index_file") or "%s.index.json" % pid)
-                for name in names:
-                    data = bytes_at(drive, "%s/%s" % (root, name), tok)
-                    if data is None:
-                        raise SystemExit("archive assembly failed: shard %d missing %s" % (n, name))
-                    archive_member(zf, "%s/%s" % (prefix, name), data)
-                    files += 1
-
-            # Like the folder, the shard index is written after everything it names.
-            archive_member(zf, "%s/index.json" % prefix, index_bytes)
-            files += 1
-
-    return files, os.path.getsize(out_path)
+    return day, changes
 
 
 def main(argv=None):
@@ -268,21 +248,13 @@ def main(argv=None):
     base = env("GRAPH_DEST_ROOT").strip("/")
     tok = graph_token()
 
-    day = collect(drive, base, args.date, args.shards, args.slices, args.run_id, tok)
-    fd, archive_path = tempfile.mkstemp(prefix="eis_shards_", suffix=".zip")
-    os.close(fd)
-    try:
-        archive_files, archive_size = build_shards_archive(
-            drive, base, args.date, args.shards, tok, archive_path)
-        archive_dest = "%s/%s/shards.zip" % (base, args.date)
-        upload_file(drive, archive_dest, archive_path, tok)
-        archive_item = item_at(drive, archive_dest, tok)
-        if not archive_item:
-            raise SystemExit("archive upload finished but shards.zip is not readable")
-        day["shards_archive_uri"] = uri(drive, archive_item)
-    finally:
-        if os.path.exists(archive_path):
-            os.remove(archive_path)
+    day, changes = collect(drive, base, args.date, args.shards, args.slices, args.run_id, tok)
+
+    # The diff before the list, for the same reason the list goes after the shards: day.json
+    # is the proof that the day is there to be read, and it names `changes.json`. A reader
+    # holding a list that points at a file still arriving is the one state worth preventing.
+    changes_bytes = json.dumps(changes, ensure_ascii=False).encode("utf-8")
+    upload(drive, "%s/%s/changes.json" % (base, args.date), changes_bytes, tok)
 
     upload(drive, "%s/%s/day.json" % (base, args.date),
            json.dumps(day, ensure_ascii=False).encode("utf-8"), tok)
@@ -292,8 +264,24 @@ def main(argv=None):
           % (args.date, day["counts"]["tenders"], day["counts"]["documents"],
              day["counts"]["chars"] / 1e6, day["shards_present"],
              "" if day["complete"] else ", MISSING %s" % day["shards_missing"]))
-    print("  shards.zip: %d files, %.1f MB" %
-          (archive_files, archive_size / 1e6))
+    # A guard that fires silently is half a guard: an index left by an earlier run of this
+    # date is the difference between a short day and a day that only looks whole.
+    # Printed whether or not it found anything, because a silent check and a check that never
+    # ran look identical in a log — and the second is how a short day passes for a whole one.
+    print("  coverage: %d target(s), %d delivered, %d settled, %d unaccounted"
+          % (day["coverage"]["targets"], day["coverage"]["delivered"],
+             day["coverage"]["excused"], len(day["coverage"]["unaccounted"])))
+    if day["coverage"]["unaccounted"]:
+        print("  %d of %d target(s) reached no shard — the day is short: %s"
+              % (len(day["coverage"]["unaccounted"]), day["coverage"]["targets"],
+                 ", ".join(day["coverage"]["unaccounted"][:8])
+                 + (" …" if len(day["coverage"]["unaccounted"]) > 8 else "")))
+    if day["shards_stale"]:
+        print("  shard(s) %s carried an index from an earlier run of this date and were "
+              "counted missing" % day["shards_stale"])
+    print("  changes.json: %d new, %d changed, %d unchanged (%.0f KB)"
+          % (changes["counts"].get("new", 0), changes["counts"].get("changed", 0),
+             changes["counts"].get("unchanged", 0), len(changes_bytes) / 1e3))
     for row in day["slice_load"]:
         print("  slice %d: %d tenders, %.1f MB" % (row["slice"], row["tenders"],
                                                    row["chars"] / 1e6))

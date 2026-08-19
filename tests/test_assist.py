@@ -229,6 +229,39 @@ class LocalOcr(unittest.TestCase):
         self.assertIn("tesseract", str(caught.exception).lower())
 
 
+class ScanLaneNeverFailsTheRun(unittest.TestCase):
+    """The lane reads what the extractor could not, and may not cost a tender either way.
+
+    A pack whose scans stay unread is exactly as complete as it was before this lane existed,
+    so `read_scans` returns 0 whatever happens inside it. The guard used to name one exception
+    class, which made the promise depend on what a dependency chose to raise: PyMuPDF raises
+    its own hierarchy rather than RuntimeError, and one oversized page threw
+    `code=5: Overly large image` past the handler and marked a tender carrying 1.4 million
+    extracted characters as failed.
+    """
+
+    def lane(self, exc):
+        import eis_tool
+        original = assist.run
+        self.addCleanup(setattr, assist, "run", original)
+
+        def explode(*a, **kw):
+            raise exc
+        assist.run = explode
+        return eis_tool.read_scans("pack")
+
+    def test_a_dependency_raising_its_own_class_does_not_fail_the_run(self):
+        class FzError(Exception):
+            pass
+        self.assertEqual(self.lane(FzError("code=5: Overly large image")), 0)
+
+    def test_the_documented_case_still_holds(self):
+        self.assertEqual(self.lane(RuntimeError("tesseract is not installed")), 0)
+
+    def test_nor_does_anything_else_it_might_raise(self):
+        self.assertEqual(self.lane(ValueError("a page that is not a page")), 0)
+
+
 if __name__ == "__main__":
     unittest.main()
 

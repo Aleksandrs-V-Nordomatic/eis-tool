@@ -166,11 +166,18 @@ def read_scans(pack, model=None, limit=None, provider=None):
         print("scan lane skipped — %s_API_KEY not set (the pack is complete without it)"
               % provider.upper())
         return 0
+    # EVERY exception, not one class of them. This lane reads files the deterministic
+    # extractor already listed as unreadable, and a pack whose scans stay unread is exactly
+    # as complete as it was before the lane existed — so nothing it does may fail a tender.
+    # Guarding only RuntimeError made that promise depend on which class a dependency
+    # happened to raise: PyMuPDF raises its own hierarchy, so rasterising one oversized page
+    # threw `code=5: Overly large image` straight past this handler and marked a tender with
+    # 20 records, 50 files and 1.4 million extracted characters as a failure.
     try:
         doc = assist_mod.run(pack, model=model, api_key=api_key, provider=provider,
                              limit=limit)
-    except RuntimeError as exc:
-        print("scan lane skipped — %s" % exc)
+    except Exception as exc:
+        print("scan lane skipped — %s" % str(exc)[:200])
         return 0
     print("%s lane · %d read · %d deferred · %d skipped"
           % (doc["provider"], doc["read"], doc["deferred"], doc["skipped"]))

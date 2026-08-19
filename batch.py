@@ -4,7 +4,9 @@
 Many tenders, one polite download stream, and the reading done in the gaps.
 
     python3 batch.py --targets targets.txt --out packs
-    python3 batch.py --days 1 --out packs          # discover the window first
+    python3 batch.py --days 1 --out packs                        # discover the window first
+    python3 batch.py --from 2026-08-17 --to 2026-08-17 \
+                     --targets watching.txt --out packs          # a day, and a named few
 
 WHERE THE TIME GOES. A record costs a little work and then a pause several times longer —
 the pause that keeps EIS answering us. Most of a tender's wall clock is therefore spent
@@ -35,7 +37,9 @@ other fifty.
 import argparse
 import json
 import os
+import hashlib
 import queue as queue_mod
+import re
 import sys
 import threading
 import time
@@ -176,33 +180,40 @@ def weigh(notice):
     return 10.0 if heavy else 1.0
 
 
-def plan_shards(items, of, weight=None):
-    """Split `items` into `of` lists of similar total weight.
+def shard_of(target, of):
+    """Which runner owns this target, 1..of, decided from the target and nothing else.
 
-    Longest-processing-time-first: heaviest item onto whichever shard is currently lightest.
-    Deterministic — every shard computes the same plan from the same input and takes its own
-    slice, so no planning job and no coordination is needed.
+    THE PARTITION USED TO BE A PROPERTY OF THE LIST, AND THAT IS WHAT BROKE IT. Each shard
+    walks the register for itself and then split the result by longest-processing-time-first
+    bin-packing, on the premise that the same input gives every shard the same plan. The
+    premise fails the moment one shard's answer differs by a single notice — and the failure
+    is not proportional, because greedy packing cascades: one item changing weight moves it
+    in the sort order and reshuffles everything packed after it.
+
+    Measured on a four-shard run over three days of publications. All four agreed there were
+    93 targets; one weighed a single notice differently; the slices came to 21+23+23+23 —
+    ninety assignments covering sixty-eight distinct tenders. Twenty-two fetched twice, about
+    two dozen fetched by nobody, and the day called itself complete because every shard had
+    delivered something.
+
+    A digest of the target's own identity cannot cascade. Two shards that disagree about the
+    list still agree about every tender in it, so the only way to lose one is for its owner
+    not to have seen it — a straight miss rather than a reshuffle, and `coverage` names it.
+
+    WHAT THIS GIVES UP, PLAINLY: the weighted balance. It bought less than it looked like it
+    did — the class prior is a prior, and the variance inside the class dwarfs the difference
+    between classes, so no arrangement of whole tenders finishes faster than the largest one
+    takes. The same run that lost two dozen tenders spent 46.8 minutes on one shard against
+    7.4 on another, balanced. A digest spreads heavy and light alike in expectation, which is
+    as much as a class prior can honestly promise.
     """
-    if not of or of < 2:
-        return [list(items)]
-    weight = weight or (lambda x: 1.0)
-    # Sort by weight, then by the item itself, so ties never depend on dict ordering.
-    ordered = sorted(items, key=lambda x: (-weight(x), str(x)))
-    lists = [[] for _ in range(of)]
-    loads = [0.0] * of
-    for item in ordered:
-        lightest = loads.index(min(loads))
-        lists[lightest].append(item)
-        loads[lightest] += weight(item)
-    return lists
+    key = identity(target) or str(target)
+    digest = hashlib.sha256(key.encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], "big") % of + 1
 
 
-def take_shard(targets, shard, of, weights=None):
+def take_shard(targets, shard, of):
     """This runner's slice, or nothing at all if this runner was not asked for.
-
-    With weights it is a balanced partition; without them, round-robin — which still beats
-    contiguous blocks, because a block containing the day's monster leaves everyone else
-    idle while it grinds.
 
     THE GUARD IS THE POINT. The workflow matrix is fixed at four shards while `--of` comes
     from an input, so asking for two shards still starts four jobs. Without this, shard 3
@@ -213,46 +224,99 @@ def take_shard(targets, shard, of, weights=None):
     if of and shard > of:
         return []
     if not of or of < 2:
-        return targets
-    if weights:
-        plan = plan_shards(targets, of, lambda t: weights.get(t, 1.0))
-        return plan[(shard - 1) % of]
-    return [t for i, t in enumerate(targets) if i % of == (shard - 1) % of]
+        return list(targets)
+    return [t for t in targets if shard_of(t, of) == shard]
+
+
+_EIS_URL_ID = re.compile(r"/EKEIS/Supplier/Procurement/(\d+)", re.I)
+
+
+def identity(target):
+    """A comparable identity for a target, worked out without asking the network anything.
+
+    Deduplication has to happen BEFORE the list is split across shards, and it has to be
+    cheap: two shards handed the same tender both download it, both deliver it, and both
+    write its state — which is the one arrangement that can lose an update, because the
+    second writer's fingerprint overwrites the first's without having seen its documents.
+
+    An EIS URL and a bare id are the same tender and reduce to the same key here. A notice
+    uuid cannot be reduced without resolving it, which is a request; it keys as itself, and
+    the case that matters — a caller naming by uuid what discovery already found — is caught
+    below against the uuids discovery hands back.
+    """
+    t = (target or "").strip()
+    if not t:
+        return None
+    if t.isdigit():
+        return "eis:%s" % t
+    found = _EIS_URL_ID.search(t)
+    return "eis:%s" % found.group(1) if found else "iub:%s" % t.casefold()
+
+
+def named_targets(path):
+    """The caller's own list, comments and blanks removed."""
+    # `utf-8-sig`, because a list typed on Windows arrives with a byte-order mark and
+    # the first id then is not a number. `as_url` sends it to `resolve`, which answers
+    # None, and the run reports "no EIS procurement behind it" for a target that is
+    # plainly there — a diagnosis that sends the reader to the portal instead of to
+    # their text editor.
+    with open(path, encoding="utf-8-sig") as fh:
+        lines = [l.split("#")[0].strip() for l in fh]
+    return [l for l in lines if l]
 
 
 def targets_from(path=None, days=None, date_from=None, date_to=None, no_gate=False):
-    """(targets, weights, uuids). A hand-written list carries no register data, so it
-    weighs 1 — and, having come from nobody knows where, proves nothing about the register
-    either, so it contributes no uuid and its packs come back `register_check: unverified`.
+    """(targets, weights, uuids) for the window, the named list, or BOTH.
+
+    A caller that wants yesterday's publications *and* a handful of tenders it is already
+    watching asks for both in one run and gets one list. That is not a convenience: fetching
+    them as two runs means two draws against a portal that refuses a third of runner
+    addresses, two deliveries into the same day, and two `day.json` files where the second
+    silently describes less than the first.
+
+    A hand-written entry carries no register data, so it weighs 1 — and, having come from
+    nobody knows where, proves nothing about the register either, so it contributes no uuid
+    and its packs come back `register_check: unverified`. A tender in both halves keeps the
+    discovered version, which is the one that knows its notice.
     """
+    targets, weights, uuids, seen, dropped = [], {}, {}, set(), 0
+
+    if days is not None or date_from or date_to:
+        found = eis_tool.discover(days=days or 1, date_from=date_from, date_to=date_to)
+        policy = None if no_gate else load_policy()
+        for n in found["notices"]:
+            if not n["eis_url"]:
+                continue
+            if outside_scope(n, policy):
+                dropped += 1
+                continue
+            targets.append(n["eis_url"])
+            weights[n["eis_url"]] = weigh(n)
+            seen.add(identity(n["eis_url"]))
+            # The register notice this target came from. Carried the whole way down so the
+            # pack records that membership was established by discovery, rather than
+            # re-deriving it from a page that usually does not say.
+            if n.get("uuid"):
+                uuids[n["eis_url"]] = n["uuid"]
+                seen.add("iub:%s" % n["uuid"].casefold())
+        if dropped:
+            say("pre-download filter: %d of %d notice(s) matched no recall term - not fetched"
+                % (dropped, dropped + len(targets)))
+
     if path:
-        # `utf-8-sig`, because a list typed on Windows arrives with a byte-order mark and
-        # the first id then is not a number. `as_url` sends it to `resolve`, which answers
-        # None, and the run reports "no EIS procurement behind it" for a target that is
-        # plainly there — a diagnosis that sends the reader to the portal instead of to
-        # their text editor.
-        with open(path, encoding="utf-8-sig") as fh:
-            lines = [l.split("#")[0].strip() for l in fh]
-        return [l for l in lines if l], {}, {}
-    found = eis_tool.discover(days=days or 1, date_from=date_from, date_to=date_to)
-    policy = None if no_gate else load_policy()
-    targets, weights, uuids, dropped = [], {}, {}, 0
-    for n in found["notices"]:
-        if not n["eis_url"]:
-            continue
-        if outside_scope(n, policy):
-            dropped += 1
-            continue
-        targets.append(n["eis_url"])
-        weights[n["eis_url"]] = weigh(n)
-        # The register notice this target came from. Carried the whole way down so the pack
-        # records that membership was established by discovery, rather than re-deriving it
-        # from a page that usually does not say.
-        if n.get("uuid"):
-            uuids[n["eis_url"]] = n["uuid"]
-    if dropped:
-        say("pre-download filter: %d of %d notice(s) matched no recall term - not fetched"
-            % (dropped, dropped + len(targets)))
+        asked = named_targets(path)
+        window = set(seen)
+        for t in asked:
+            key = identity(t)
+            if key in seen:
+                continue
+            seen.add(key)
+            targets.append(t)
+        overlap = sum(1 for t in asked if identity(t) in window)
+        if overlap:
+            say("named list: %d target(s), %d of them already in the window"
+                % (len(asked), overlap))
+
     return targets, weights, uuids
 
 
@@ -272,6 +336,61 @@ def post_process(pack, llm_max_files=None):
     if code:
         raise RuntimeError("normalize exited %s" % code)
     eis_tool.read_scans(pack, limit=llm_max_files)
+
+
+def resolutions(out):
+    """What each asked-for string turned into, as identity → identity, from `resolved.tsv`."""
+    path = os.path.join(out, "resolved.tsv")
+    found = {}
+    if not os.path.exists(path):
+        return found
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            asked, _, pid = line.rstrip("\n").partition("\t")
+            key = identity(asked)
+            if key and pid and pid != "-":
+                found[key] = "eis:%s" % pid
+    return found
+
+
+def write_accounts(out, day_targets, failed, withdrawn):
+    """What the WHOLE day was asked for, beside what this shard could not deliver of it.
+
+    THE SHARD PARTITION IS NOT AS DETERMINISTIC AS IT LOOKS, and this file is how that stops
+    being invisible. `plan_shards` is a greedy bin-pack over a list every shard computes for
+    itself by walking the register; the shards are supposed to agree and take disjoint
+    slices. Measured on one four-shard run: all four agreed there were 93 targets, one of
+    them weighed a single notice differently, and the slices came to 21+23+23+23 — ninety
+    assignments covering sixty-eight distinct tenders. Twenty-two fetched twice, and about
+    two dozen fetched by nobody, while the day called itself complete because every shard
+    had delivered something.
+
+    So each shard publishes the day's whole target list, not just its own slice. `collect_day`
+    unions them, subtracts what was delivered and what the shards reported as failed or
+    withdrawn, and what is left is a tender nobody fetched. This measures the gap; it does
+    not close it. Closing it means changing how the work is divided, which is a larger change
+    and a different trade — a stable split costs the balancing that keeps one runner from
+    taking every heavy tender.
+
+    Identities rather than URLs, so the reader compares strings and never parses anything.
+    """
+    # A NOTICE UUID IS NOT WHAT THE DAY DELIVERS. It is asked for as `iub:<uuid>` and comes
+    # back as a procurement id, so left alone it could never match a delivered tender and
+    # would sit in `unaccounted` for ever — the coverage check calling every day short on a
+    # target that arrived. `resolved.tsv` is what each asked-for string turned into, so the
+    # identities are normalised through it before anyone compares them.
+    seen = resolutions(out)
+    key = lambda t: seen.get(identity(t), identity(t))
+    body = {"schema": "shard-accounts/1",
+            "targets": sorted({key(t) for t in day_targets if identity(t)}),
+            "failed": sorted({key(l.split()[0]) for l in failed if l.split()}),
+            "withdrawn": sorted({key(l.split()[0]) for l in withdrawn if l.split()}),
+            # What this shard resolved, so the collector can normalise a uuid that another
+            # shard owned and this one only ever saw as a target.
+            "resolved": {k: v for k, v in sorted(seen.items()) if k != v}}
+    with open(os.path.join(out, "accounts.json"), "w", encoding="utf-8") as fh:
+        json.dump(body, fh, ensure_ascii=False)
+    return body
 
 
 def run(targets, out, llm_max_files=None, workers=1, sections=None, uuids=None):
@@ -380,7 +499,8 @@ def main(argv=None):
     utf8_streams()
     ap = argparse.ArgumentParser(description=__doc__.strip().split("\n")[0])
     ap.add_argument("--targets", help="file of EIS URLs, ids or notice uuids, one per line")
-    ap.add_argument("--days", type=int, default=None, help="discover this window instead")
+    ap.add_argument("--days", type=int, default=None,
+                    help="also discover this window; combines with --targets")
     ap.add_argument("--from", dest="date_from")
     ap.add_argument("--to", dest="date_to")
     ap.add_argument("--out", default="packs")
@@ -393,17 +513,18 @@ def main(argv=None):
                     help="ignore EIS_POLICY and fetch every discovered notice")
     args = ap.parse_args(argv)
 
-    if not args.targets and args.days is None and not args.date_from:
-        ap.error("give --targets, or --days/--from to discover")
+    if not args.targets and args.days is None and not (args.date_from or args.date_to):
+        ap.error("give --targets, or --days/--from to discover, or both")
     try:
         targets, weights, uuids = targets_from(args.targets, args.days, args.date_from,
                                                args.date_to, args.no_gate)
     except RuntimeError as exc:
         print(exc, file=sys.stderr)
         return 2
+    whole_list = list(targets)
     whole = len(targets)
     heavy = sum(1 for t in targets if weights.get(t, 1) > 1)
-    targets = take_shard(targets, args.shard, args.of, weights)
+    targets = take_shard(targets, args.shard, args.of)
     if not targets:
         say("nothing to fetch")
         return 0
@@ -417,6 +538,9 @@ def main(argv=None):
     sections = eis_fetch.SECTIONS[:1] if args.skip_archive else None
     done, failed, withdrawn = run(targets, args.out, args.llm_max_files, sections=sections,
                                   uuids=uuids)
+    # The WHOLE day's targets, not this shard's slice — `whole_list` is the list before it
+    # was split, which is exactly what a reader needs to tell a short day from a full one.
+    write_accounts(args.out, whole_list, failed, withdrawn)
     # A tender that could not be fetched is recorded, not fatal: the run still delivered
     # everything else, and a caller that treated this as total failure would throw it away.
     # A tender EIS itself says has nothing to show is weaker still: `failed` alone decides

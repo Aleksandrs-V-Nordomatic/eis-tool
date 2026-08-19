@@ -5,8 +5,8 @@ Assert on the runner what the consumer will assert after retrieval.
 
     python3 verify.py --out out
 
-The archive is hashed here and hashed again once Claude has pulled it through the GitHub
-connector. A truncated transfer and a clean download look identical unless both ends agree
+The archive is hashed here and hashed again once the consumer has pulled it through the
+GitHub connector. A truncated transfer and a clean download look identical unless both ends agree
 on a digest, so both ends compute one.
 """
 

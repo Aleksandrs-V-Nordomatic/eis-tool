@@ -218,6 +218,92 @@ class Targets(unittest.TestCase):
         self.assertEqual(batch.as_url(url), url)
 
 
+class WindowAndList(unittest.TestCase):
+    """A period and a named list are asked for together, and come back as one list.
+
+    Two runs would be two draws against a portal that refuses a third of runner addresses,
+    two deliveries into one date, and two `day.json` files where the second describes less
+    than the first and nothing says which is which.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="eis_union_")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.addCleanup(setattr, batch.eis_tool, "discover", batch.eis_tool.discover)
+
+    def url(self, pid):
+        return "https://www.eis.gov.lv/EKEIS/Supplier/Procurement/%s" % pid
+
+    def discovers(self, *notices):
+        batch.eis_tool.discover = lambda **kw: {"notices": list(notices)}
+
+    def notice(self, pid, uuid=None, cpv=None):
+        return {"eis_url": self.url(pid), "uuid": uuid, "title": "Tender %s" % pid,
+                "cpv": cpv}
+
+    def named(self, *lines):
+        path = os.path.join(self.dir, "t.txt")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(lines) + "\n")
+        return path
+
+    def test_both_halves_are_fetched_in_one_run(self):
+        self.discovers(self.notice("1"), self.notice("2"))
+        targets, _w, _u = batch.targets_from(self.named("500"), days=1)
+        self.assertEqual(targets, [self.url("1"), self.url("2"), "500"])
+
+    def test_a_tender_in_both_halves_is_fetched_once(self):
+        # Two shards handed the same tender both download it, both deliver it and both write
+        # its state — the one arrangement that can lose an update, because the second writer's
+        # fingerprint overwrites the first's without having seen its documents.
+        self.discovers(self.notice("1"), self.notice("2"))
+        targets, _w, _u = batch.targets_from(self.named("2", "500"), days=1)
+        self.assertEqual(targets, [self.url("1"), self.url("2"), "500"])
+
+    def test_a_bare_id_and_its_url_are_the_same_tender(self):
+        self.discovers(self.notice("1"))
+        targets, _w, _u = batch.targets_from(self.named(self.url("1")), days=1)
+        self.assertEqual(targets, [self.url("1")])
+        self.assertEqual(batch.identity("1"), batch.identity(self.url("1")))
+
+    def test_a_notice_uuid_discovery_already_found_is_not_asked_for_twice(self):
+        # A uuid cannot be reduced to an id without resolving it, which is a request. The
+        # case that matters is caught against the uuids discovery hands back.
+        self.discovers(self.notice("1", uuid="A1B2"))
+        targets, _w, _u = batch.targets_from(self.named("a1b2"), days=1)
+        self.assertEqual(targets, [self.url("1")])
+
+    def test_the_discovered_half_keeps_its_weight_and_its_notice(self):
+        # A tender in both halves keeps the discovered version, which is the one that knows
+        # its register notice — the named list proves nothing about the register.
+        self.discovers(self.notice("1", uuid="A1B2", cpv=[{"code": "45000000-7"}]))
+        targets, weights, uuids = batch.targets_from(self.named("1"), days=1)
+        self.assertEqual(targets, [self.url("1")])
+        self.assertEqual(weights[self.url("1")], 10.0)
+        self.assertEqual(uuids[self.url("1")], "A1B2")
+
+    def test_a_named_entry_weighs_one_and_vouches_for_nothing(self):
+        self.discovers()
+        targets, weights, uuids = batch.targets_from(self.named("500"), days=1)
+        self.assertEqual((targets, weights, uuids), (["500"], {}, {}))
+
+    def test_a_list_alone_asks_the_register_nothing(self):
+        def refuse(**kw):
+            raise AssertionError("discovery was walked for a run that named its targets")
+        batch.eis_tool.discover = refuse
+        targets, _w, _u = batch.targets_from(self.named("500"))
+        self.assertEqual(targets, ["500"])
+
+    def test_an_exact_date_range_is_a_window_even_beside_a_list(self):
+        # This is how "yesterday, and these" is written: naming a range is how the window is
+        # asked for alongside a list, and `days` stays the fallback for neither.
+        asked = {}
+        batch.eis_tool.discover = lambda **kw: asked.update(kw) or {"notices": []}
+        batch.targets_from(self.named("500"), date_from="2026-08-17", date_to="2026-08-17")
+        self.assertEqual((asked["date_from"], asked["date_to"]),
+                         ("2026-08-17", "2026-08-17"))
+
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -300,32 +386,51 @@ class Weighing(unittest.TestCase):
         self.assertEqual(batch.weigh({"cpv_main": "33000000-0", "work_kind": "Piegādes"}), 1.0)
         self.assertEqual(batch.weigh({}), 1.0)
 
-    def test_the_heavy_ones_are_spread_rather_than_bunched(self):
-        # The pathological case this exists to prevent: every heavy tender on one runner.
-        items = ["c%02d" % i for i in range(11)] + ["s%02d" % i for i in range(36)]
-        w = {t: (10.0 if t.startswith("c") else 1.0) for t in items}
-        plan = batch.plan_shards(items, 4, lambda t: w[t])
-        heavy = [sum(1 for t in p if t.startswith("c")) for p in plan]
-        self.assertLessEqual(max(heavy) - min(heavy), 1, heavy)
 
-    def test_the_partition_is_deterministic_so_shards_need_no_coordination(self):
-        items = ["t%02d" % i for i in range(20)]
-        w = {t: (10.0 if int(t[1:]) % 3 == 0 else 1.0) for t in items}
-        first = batch.plan_shards(items, 4, lambda t: w[t])
-        again = batch.plan_shards(list(reversed(items)), 4, lambda t: w[t])
-        self.assertEqual(first, again)
+
+class WhoOwnsATender(unittest.TestCase):
+    """Membership is a property of the tender, never of the list it arrived in.
+
+    The shards never talk to each other: each walks the register and takes what is its own.
+    That only works if two shards holding slightly different lists still agree about every
+    tender in both. A greedy bin-pack does not — one item weighed differently moves it in the
+    sort order and reshuffles everything packed after it. Measured on a four-shard run: all
+    four agreed on 93 targets, the slices came to 21+23+23+23, ninety assignments covering
+    sixty-eight tenders. About two dozen went unfetched and the day called itself complete.
+    """
+
+    def test_a_disagreement_about_the_list_moves_nothing_else(self):
+        # The property the old partition lacked, stated directly: drop an item, insert
+        # another, and every surviving tender stays with the shard that already owned it.
+        first = ["eis:%d" % i for i in range(40)]
+        second = [t for t in first if t != "eis:17"] + ["eis:900"]
+        before = {t: batch.shard_of(t, 4) for t in first}
+        after = {t: batch.shard_of(t, 4) for t in second}
+        for t in set(before) & set(after):
+            self.assertEqual(before[t], after[t], t)
+
+    def test_a_url_and_its_bare_id_are_owned_by_the_same_shard(self):
+        url = "https://www.eis.gov.lv/EKEIS/Supplier/Procurement/179550"
+        self.assertEqual(batch.shard_of(url, 4), batch.shard_of("179550", 4))
 
     def test_every_target_lands_in_exactly_one_shard(self):
         items = ["t%02d" % i for i in range(23)]
-        plan = batch.plan_shards(items, 4, lambda t: 1.0)
-        flat = [t for p in plan for t in p]
-        self.assertEqual(sorted(flat), sorted(items))
-        self.assertEqual(len(flat), len(set(flat)))
+        seen = [t for shard in (1, 2, 3, 4) for t in batch.take_shard(items, shard, 4)]
+        self.assertEqual(sorted(seen), sorted(items))
+        self.assertEqual(len(seen), len(set(seen)))
 
-    def test_without_weights_it_falls_back_to_round_robin(self):
-        items = ["a", "b", "c", "d", "e"]
-        self.assertEqual(batch.take_shard(items, 1, 2), ["a", "c", "e"])
-        self.assertEqual(batch.take_shard(items, 2, 2), ["b", "d"])
+    def test_it_spreads_rather_than_bunches(self):
+        # A digest promises uniformity in expectation and nothing sharper. That is as much as
+        # the class prior could honestly buy: the variance inside a class dwarfs the
+        # difference between classes, so no arrangement beats the largest single tender.
+        items = ["eis:%d" % i for i in range(400)]
+        counts = [len(batch.take_shard(items, n, 4)) for n in (1, 2, 3, 4)]
+        self.assertEqual(sum(counts), 400)
+        self.assertLess(max(counts) - min(counts), 60, counts)
+
+    def test_one_shard_of_one_takes_everything(self):
+        items = ["a", "b", "c"]
+        self.assertEqual(batch.take_shard(items, 1, 1), items)
 
 
 class DownloadFilter(unittest.TestCase):
@@ -453,6 +558,6 @@ class ShardsOutsideTheRequest(unittest.TestCase):
         weights = {t: (10.0 if int(t[1:]) % 3 == 0 else 1.0) for t in targets}
         seen = []
         for shard in (1, 2, 3, 4):
-            seen += batch.take_shard(targets, shard, 2, weights)
+            seen += batch.take_shard(targets, shard, 2)
         self.assertEqual(sorted(seen), sorted(targets))
         self.assertEqual(len(seen), len(set(seen)))
