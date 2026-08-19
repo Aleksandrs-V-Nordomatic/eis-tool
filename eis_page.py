@@ -87,6 +87,33 @@ def is_access_denied(page):
     """EIS's own 'no displayable stage' page — permanent, and not this tool's failure."""
     return bool(page) and any(mark in page for mark in ACCESS_DENIED_MARKERS)
 
+
+# A FOURTH ANSWER, AND THE ONLY ONE THAT MEANS "COME BACK LATER".
+#
+# EIS puts a bot check in front of the portal when it has been asked for a great deal in a
+# short time. It answers HTTP 200 with a full HTML page titled `Pārbaude pret robotiem` —
+# "robot check" — carrying `Lūdzu uzgaidiet...`, please wait. Nothing about the status line
+# says anything is wrong, so code that trusts the response code reads it as a delivered
+# procurement page.
+#
+# `is_published` already refuses it, because the page carries none of the structure a
+# procurement has. That is what stops it being written down as fact. But refusing it makes
+# it indistinguishable from an id that is genuinely not published, and those two call for
+# opposite behaviour: an unpublished id may publish tomorrow and is worth re-walking, while
+# a bot check means STOP ASKING and come back later — the same request will keep returning
+# this page, faster than the portal can be helped by being asked again.
+#
+# Measured 2026-08-19: it appeared after roughly 30 000 requests in a day at 0.25-0.4 s
+# apart, and then answered 38 consecutive ids this way while those procurements were
+# demonstrably live — the census had read them hours earlier.
+ROBOT_CHECK_MARKERS = ("Pārbaude pret robotiem",)
+
+
+def is_robot_check(page):
+    """EIS asking us to slow down, dressed as HTTP 200. Temporary — retry later, not now."""
+    return bool(page) and any(mark in page for mark in ROBOT_CHECK_MARKERS)
+
+
 # Attribute-aware on purpose. The obvious `<label[^>]*for="([^"]*)"[^>]*>` breaks the moment
 # an attribute value contains a `>` — a tooltip written as `title="<div>help</div>"` ends the
 # tag early, and the "label" then captured is the help text. That failure is silent: the field

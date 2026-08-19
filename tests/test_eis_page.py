@@ -408,6 +408,49 @@ class ParseNotice(unittest.TestCase):
         self.assertEqual(walked[0]["register_check"], "unverified")
 
 
+class RobotCheck(unittest.TestCase):
+    """EIS asking us to slow down, dressed as a successful response.
+
+    Met on 2026-08-19 after about 30 000 requests in a day: the portal began answering with
+    HTTP 200 and a full page titled `Pārbaude pret robotiem`, for 38 consecutive ids whose
+    procurements were demonstrably live — a census had read them hours earlier. Nothing in
+    the status line said anything was wrong.
+
+    Two properties matter, and they are different. It must not be mistaken for a tender —
+    which `is_published` already ensures, and which is what kept those 38 out of the data as
+    facts. And it must not be mistaken for an unpublished id, because the two call for
+    opposite behaviour: an unpublished id is worth walking again tomorrow, a bot check means
+    stop asking now.
+    """
+
+    PAGE = ('<!DOCTYPE html><html><head><title>EIS - Pārbaude pret robotiem</title>'
+            '</head><body><div>Lūdzu uzgaidiet...</div>'
+            '<div>Elektronisko Iepirkumu Sistēma</div></body></html>')
+
+    def test_it_is_not_a_procurement(self):
+        self.assertFalse(eis_page.is_published(self.PAGE))
+        self.assertIsNone(eis_page.parse_notice(self.PAGE, "179108"))
+
+    def test_it_is_recognised_for_what_it_is(self):
+        self.assertTrue(eis_page.is_robot_check(self.PAGE))
+
+    def test_a_real_page_is_not_mistaken_for_one(self):
+        for page in (PAGE, ENGLISH_PAGE):
+            self.assertFalse(eis_page.is_robot_check(page))
+
+    def test_it_is_not_the_permanent_refusal(self):
+        # `Pieeja liegta / Access Denied` is final; this one passes. A caller that treated
+        # them alike would either hammer a page that will never open, or give up on 38
+        # procurements that were there all along.
+        self.assertFalse(eis_page.is_access_denied(self.PAGE))
+        denied = "<html><body>Pieeja liegta / Access Denied</body></html>"
+        self.assertFalse(eis_page.is_robot_check(denied))
+
+    def test_an_empty_answer_is_neither(self):
+        for empty in (None, ""):
+            self.assertFalse(eis_page.is_robot_check(empty))
+
+
 class ParseDocuments(unittest.TestCase):
     def test_both_sections_are_read_and_the_archive_is_labelled(self):
         docs = eis_page.parse_documents(PAGE)
