@@ -113,6 +113,18 @@ what a run did; the tenders it did it to are addressed from here. `changes.json`
 `day.json` answer everything a consumer asks of a day, and both are small — so a reader
 takes the two, then fetches only the tenders they point at.
 
+**Each document in `index.json` carries `download`: the EIS address of the file its text was
+extracted from.** A consumer that shows somebody one sentence out of one document is asked,
+next, for the document — and the index is the only file it has open. The ids that address a
+download were learned during the fetch and live nowhere a reader looks, so rebuilding them
+means a page and a POST per record against a portal that refuses a third of the addresses
+that ask. Two shapes, because the download had two: a file EIS offers on its own is linked
+directly, and a file it only serves inside its record's archive is linked as that archive —
+which is also what the person clicking receives. A file the extractor found inside a
+published archive is the same case from the other end, so its link is the archive and
+`source` goes on naming the member to open. A document the manifest cannot place carries no
+`download` at all, because a guessed URL fetches another tender's document silently.
+
 **A tender delivered again uploads only the documents that were not there before.** Its
 name is the digest of the file it came from, so an unchanged document has the same address
 every day and there is nothing to re-send; `index.json` in the home goes on naming it, and a

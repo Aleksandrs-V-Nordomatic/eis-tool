@@ -488,6 +488,56 @@ def load_json(pack, *rel):
         return json.load(fh)
 
 
+# WHERE EIS SERVES THE FILE A DOCUMENT WAS EXTRACTED FROM.
+#
+# A consumer that shows somebody the sentence which made a tender interesting is asked, next,
+# for the document itself — and the index is the only file it has open. The ids that address
+# a download were learned during the walk this tool already did; they sit in `manifest.json`
+# and in no file the reader opens. Rebuilding them costs a page fetch and a POST per record,
+# against a portal that refuses a third of the addresses that ask.
+#
+# TWO ROUTES OUT, BECAUSE THE DOWNLOAD HAD TWO. A record fetched file by file gives every
+# file its own id, and the link is that exact file. A record EIS would only hand over whole
+# gives its members no id at all — `file_id` is None — so the link is the record's archive,
+# which is also what the person clicking it receives.
+#
+# A file the extractor found INSIDE a published archive is the same case from the other end:
+# `original_file` names the archive that was downloaded, so the link lands on the archive and
+# `source` goes on naming the member to open. Both are honest; neither pretends EIS will
+# serve a member on its own, because it will not.
+EIS_DOCUMENT = "https://www.eis.gov.lv/EKEIS/Document/%s?%s"
+
+
+def download_url(pid, downloaded, entry):
+    """The EIS address of the file this document came out of, or None.
+
+    None is an answer, and the only safe one when `manifest.json` cannot vouch for the link:
+    a pack written before this existed, or a record the manifest does not carry. A guessed
+    URL is worse than an absent one — it downloads some other tender's document and says
+    nothing about having done so.
+    """
+    record = next((r for r in (downloaded or {}).get("documents") or []
+                   if str(r.get("id")) == str(entry.get("record_id"))
+                   and r.get("section") == entry.get("section")), None)
+    if record is None:
+        return None
+    files = [f for f in record.get("files") or []
+             if f.get("filename") == entry.get("original_file")]
+    if not files:
+        return None
+    # `document_link_type_code` is what the downloader sent, and it defaults to PRCDOC there
+    # for a record that arrived without one. Mirroring that default keeps the link identical
+    # to the request that actually fetched the bytes.
+    code = record.get("document_link_type_code") or "PRCDOC"
+    file_id = files[0].get("file_id")
+    route = "DownloadDocumentFile" if file_id is not None else "DownloadDocumentFilesInZip"
+    params = [("Id", record.get("id"))]
+    if file_id is not None:
+        params.append(("FileId", file_id))
+    params += [("DocumentLinkTypeCode", code), ("ProcurementIdentifier", pid)]
+    return EIS_DOCUMENT % (route, urllib.parse.urlencode(params))
+
+
 def index_entry(pid, pack, manifest):
     """One tender: what is here, and what it is worth opening.
 
@@ -502,25 +552,30 @@ def index_entry(pid, pack, manifest):
     the reader reads the index, decides which documents are worth the window, and opens
     only those.
 
-    Everything here is the carrier's own data — the normalized manifest and the procurement
-    page. No judgement is made and none can be: which tenders matter is the consumer's
-    business and never travels through this repository.
+    Everything here is the carrier's own data — the normalized manifest, `manifest.json` and
+    the procurement page. No judgement is made and none can be: which tenders matter is the
+    consumer's business and never travels through this repository.
     """
     proc = load_json(pack, "procurement.json") or {}
+    downloaded = load_json(pack, "manifest.json") or {}
 
     docs = []
     for e in (manifest or {}).get("documents", []):
         mp = e.get("markdown_path")
         if not mp or e.get("also_listed_under"):
             continue
-        docs.append({
+        doc = {
             "path": mp.lstrip("/"),        # already flattened, tender-root relative; open this
             "name": os.path.basename(e.get("source") or ""),
             "source": e.get("source"),                # the real path, for a citation
             "section": e.get("section"),
             "record": e.get("record_title"),
             "chars": e.get("markdown_chars"),
-        })
+        }
+        url = download_url(pid, downloaded, e)
+        if url:
+            doc["download"] = url       # where EIS serves the file this text came out of
+        docs.append(doc)
 
     return {
         "pid": pid,
