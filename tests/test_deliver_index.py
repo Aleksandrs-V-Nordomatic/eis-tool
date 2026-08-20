@@ -34,11 +34,16 @@ def digest(text):
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def pack(root, pid, docs, facts=None, extra_record=None):
+def pack(root, pid, docs, facts=None, extra_record=None, whole_record=()):
     """A finished pack, small but the real shape.
 
     `docs` is [(filename, text)]; the file's digest is taken from its text, so "the buyer
     replaced this document" is written here as "pass different text".
+
+    `whole_record` names the files EIS would only hand over inside the record's own archive.
+    The downloader gives those no file id, which is the one thing that decides how the file
+    can be addressed again — so a fixture that gave every file an id could not describe the
+    tenders where most of the documents live.
     """
     p = os.path.join(root, pid)
     shutil.rmtree(p, ignore_errors=True)
@@ -58,7 +63,8 @@ def pack(root, pid, docs, facts=None, extra_record=None):
                         "original_file": name,
                         "original_sha256": digest(text)})
         files.append({"filename": name, "original_name": name, "size": len(text),
-                      "sha256": digest(text), "duplicate": False})
+                      "sha256": digest(text), "duplicate": False,
+                      "file_id": None if name in whole_record else 900 + len(files)})
 
     os.makedirs(os.path.join(p, "normalized"), exist_ok=True)
     with open(os.path.join(p, "normalized", "manifest_normalized.json"), "w",
@@ -66,7 +72,8 @@ def pack(root, pid, docs, facts=None, extra_record=None):
         json.dump({"documents": entries, "unreadable_files": []}, fh)
 
     records = [{"id": "r1", "section": "actual", "title": "Nolikums %s" % pid,
-                "type_code": "PRCDOC", "publish_date": "2026-08-01", "files": files}]
+                "type_code": "PRCDOC", "document_link_type_code": "PRCDOC",
+                "publish_date": "2026-08-01", "files": files}]
     if extra_record:
         records.append(extra_record)
     with open(os.path.join(p, "manifest.json"), "w", encoding="utf-8") as fh:
@@ -278,6 +285,51 @@ class FirstDelivery(Delivery):
         self.assertEqual(sorted(folder), sorted(archived))
         for name in folder:
             self.assertEqual(folder[name], archived[name], name)
+
+
+class EachDocumentSaysWhereItDownloads(Delivery):
+    """A quoted document has to be openable, and the index is all the reader has.
+
+    Whoever reads this delivery ends up showing a person one sentence out of one file, and is
+    asked for the file. The ids that address it were learned during the fetch and live only in
+    `manifest.json`; asking EIS for them again is a page and a POST per record, against a
+    portal that refuses a third of the addresses that ask. So the index carries the link.
+    """
+
+    def setUp(self):
+        super(EachDocumentSaysWhereItDownloads, self).setUp()
+        pack(self.root, "111",
+             [("nolikums.pdf", "the notice"), ("apjomi.xlsx", "the quantities")],
+             whole_record=("apjomi.xlsx",))
+        self.deliver()
+        self.docs = {d["name"]: d
+                     for d in self.drive.body("%s/index.json" % self.home())["documents"]}
+
+    def test_a_file_with_its_own_id_links_to_that_exact_file(self):
+        self.assertEqual(
+            self.docs["nolikums.pdf"]["download"],
+            "https://www.eis.gov.lv/EKEIS/Document/DownloadDocumentFile"
+            "?Id=r1&FileId=900&DocumentLinkTypeCode=PRCDOC&ProcurementIdentifier=111")
+
+    def test_a_file_eis_only_serves_whole_links_to_the_records_archive(self):
+        # No file id means EIS never offered this file on its own, so neither does the link.
+        # Pointing at the record's archive is what the portal will actually answer, and it is
+        # what the person clicking receives.
+        self.assertEqual(
+            self.docs["apjomi.xlsx"]["download"],
+            "https://www.eis.gov.lv/EKEIS/Document/DownloadDocumentFilesInZip"
+            "?Id=r1&DocumentLinkTypeCode=PRCDOC&ProcurementIdentifier=111")
+
+    def test_a_document_the_manifest_cannot_place_carries_no_link_at_all(self):
+        # A pack fetched before any of this existed has no file ids to offer. Saying nothing
+        # is the only safe answer: a guessed URL downloads another tender's document and does
+        # not say it did.
+        p = pack(self.root, "222", [("tehniska.pdf", "text")])
+        with open(os.path.join(p, "manifest.json"), "w", encoding="utf-8") as fh:
+            json.dump({"procurement_id": "222", "documents": [], "withheld_records": []}, fh)
+        self.deliver()
+        for doc in self.drive.body("%s/index.json" % self.home("222"))["documents"]:
+            self.assertNotIn("download", doc)
 
 
 class PartialExtraction(Delivery):
