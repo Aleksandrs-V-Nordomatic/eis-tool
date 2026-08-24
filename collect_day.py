@@ -40,6 +40,8 @@ never travels through this repository.
 """
 
 import argparse
+import country
+import os
 import json
 import sys
 import time
@@ -242,10 +244,12 @@ def main(argv=None):
     ap.add_argument("--shards", type=int, default=4)
     ap.add_argument("--slices", type=int, default=4, help="how many consumer runs share the day")
     ap.add_argument("--run-id", default="", help="the workflow run this day came from")
+    country.add_argument(ap)
     args = ap.parse_args(argv)
 
     drive = env("GRAPH_DRIVE_ID")
-    base = env("GRAPH_DEST_ROOT").strip("/")
+    code = country.resolve(args.country, os.environ)
+    base = country.destination(env("GRAPH_DEST_ROOT"), code)
     tok = graph_token()
 
     day, changes = collect(drive, base, args.date, args.shards, args.slices, args.run_id, tok)

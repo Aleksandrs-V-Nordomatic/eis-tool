@@ -65,6 +65,10 @@ on:
         required: false
         type: boolean
         default: false
+      country:
+        description: "which country this run is for (LV or LT)"
+        required: false
+        default: "LV"
       date:
         description: "The day this batch belongs to, YYYY-MM-DD. The caller owns it; blank means the runner's UTC date"
         required: false
@@ -99,6 +103,7 @@ jobs:
       pause: ${{ inputs.pause || '5' }}
       skip_archive: ${{ inputs.skip_archive || false }}
       date: ${{ inputs.date || '' }}
+      country: ${{ inputs.country || 'LV' }}
   # THE DAY'S LIST, AND THE PROOF THAT THERE IS A DAY.
   #
   # A reader that lists folders to find its work reads the wrong day: delivery overwrites files
@@ -132,6 +137,7 @@ jobs:
           GRAPH_CLIENT_SECRET: ${{ secrets.GRAPH_CLIENT_SECRET }}
           GRAPH_DRIVE_ID: ${{ secrets.GRAPH_DRIVE_ID }}
           GRAPH_DEST_ROOT: ${{ secrets.GRAPH_DEST_ROOT }}
+          EIS_COUNTRY: ${{ inputs.country || 'LV' }}
           RUN_DATE: ${{ inputs.date }}
         run: |
           python3 collect_day.py             --date "${RUN_DATE:-$(date -u +%F)}"             --shards "${{ fromJSON(inputs.shards || '4') }}"             --slices 4             --run-id "${{ github.run_id }}"

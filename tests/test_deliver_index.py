@@ -152,16 +152,24 @@ class Delivery(unittest.TestCase):
     def deliver(self, date=None, shard="1", tool="v1"):
         """One delivery. Returns the paths written by THIS one, in order."""
         self.drive.sent = []
-        deliver_graph.main(["--packs", self.root, "--shard", shard,
+        # Latvian delivery, and it now has to say so: the country picks both the reader
+        # and the folder published to, and neither has a default.
+        deliver_graph.main(["--packs", self.root, "--shard", shard, "--country", "LV",
                             "--date", date or self.date, "--tool", tool,
                             "--run-id", "run-%s" % (date or self.date)])
         return self.drive.paths()
 
+    # The country folder is part of every delivered path now: `GRAPH_DEST_ROOT` names the
+    # folder that CONTAINS the country folders, and the tool appends the code. These two
+    # helpers are the only place the tests know that, which is what makes the change one
+    # line rather than thirty-six.
+    DEST = "dest/LV"
+
     def home(self, pid="111"):
-        return "dest/tenders/%s" % pid
+        return "%s/tenders/%s" % (self.DEST, pid)
 
     def day(self, shard="1", date=None):
-        return "dest/%s/shards/eis-batch-shard-%s" % (date or self.date, shard)
+        return "%s/%s/shards/eis-batch-shard-%s" % (self.DEST, date or self.date, shard)
 
     def change(self, pid="111", shard="1", date=None):
         """This day's record for this tender — which lives in the tender, not in the day."""
@@ -597,7 +605,8 @@ class DeliveredStructure(Delivery):
         try:
             pack(other, "222", [("spec.pdf", "no numbering here")])
             self.drive.sent = []
-            deliver_graph.main(["--packs", other, "--shard", "2", "--date", self.date])
+            deliver_graph.main(["--packs", other, "--shard", "2", "--date", self.date,
+                                "--country", "LV"])
             self.assertNotIn("structure.json", self.entries("222"))
         finally:
             shutil.rmtree(other, ignore_errors=True)

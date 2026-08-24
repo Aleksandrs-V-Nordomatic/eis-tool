@@ -80,6 +80,38 @@ The directory is named `llm/` for a lane that has not been model-first since Tes
 became its default. Renaming it would move paths the manifest already hands out, so the
 name stays and this note carries the correction.
 
+## Which country, and where it lands
+
+One run is one country. Latvia is read from EIS and Lithuania from EPPS, and the two
+portals have almost nothing in common underneath — EIS is a bespoke ASP.NET application
+serving embedded JavaScript arrays, EPPS a European Dynamics Java application serving a
+definition list. What they do have in common is everything after the read: the pack, the
+digests, the index, the change comparison and the delivery are the same code for both.
+
+    python3 eis_tool.py day 2026-08-20 --country LT --out work
+
+The country is named once and both halves follow from it. It picks the reader — `eis_page`
+or `lt_page`, refused rather than guessed for a code with neither — and it picks the folder
+published to, which is the country's own under the runtime root:
+
+```
+work/LV/  <date>/{day.json,changes.json}   tenders/<pid>/…
+work/LT/  <date>/{day.json,changes.json}   tenders/<pid>/…
+```
+
+**`GRAPH_DEST_ROOT` names the folder that CONTAINS the country folders, not one of them.**
+The code is appended by the tool. Configuring the full path instead would put the country
+in two places that can disagree, and the way that disagreement surfaces is a day of one
+country's tenders sitting in the other's folder — uploaded cleanly, indexed validly, with
+nothing anywhere saying so. A root already ending in a country code is refused, because
+`work/LV/LV` is the same mistake wearing a different hat. There is no default country for
+the same reason: a default would send the first Lithuanian run at Latvia in silence.
+
+**Lithuania needs no shards.** A shard exists so four runners can draw four addresses at a
+portal that refuses a third of them. EPPS refuses none and serves each tender as one
+archive, so its day is written directly rather than reconciled from shard indexes — the
+same two files, arrived at without the machinery that Latvia cannot do without.
+
 ## What gets published
 
 A tender has one home. A day is a list of what moved. This shape is the tool's own and is

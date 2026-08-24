@@ -20,6 +20,10 @@ on:
       # The caller names the day. A runner's own UTC date is a different day from the
       # caller's for three hours every night, and the delivery is filed by date.
       date: {required: false, type: string, default: ""}
+      # WHICH COUNTRY THIS DELIVERY IS FOR. It picks the folder published to, and the
+      # tool refuses to guess: a run that fetched one country and wrote under another
+      # uploads cleanly and says nothing, which is the failure the flag exists to stop.
+      country: {required: false, type: string, default: "LV"}
 
 permissions:
   contents: read
@@ -178,6 +182,7 @@ jobs:
           GRAPH_DRIVE_ID: ${{ secrets.GRAPH_DRIVE_ID }}
           GRAPH_DEST_ROOT: ${{ secrets.GRAPH_DEST_ROOT }}
           RUN_DATE: ${{ inputs.date }}
+          EIS_COUNTRY: ${{ inputs.country }}
         run: |
           python3 deliver_graph.py --packs packs \
             --shard "${{ inputs.shard }}" \

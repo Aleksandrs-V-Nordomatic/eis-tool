@@ -16,6 +16,7 @@ on:
       pause: {required: false, type: string, default: "5"}
       skip_archive: {required: false, type: boolean, default: false}
       date: {required: false, type: string, default: ""}
+      country: {required: false, type: string, default: "LV"}
 
 permissions:
   contents: read
@@ -37,6 +38,7 @@ jobs:
       pause: ${{ inputs.pause }}
       skip_archive: ${{ inputs.skip_archive }}
       date: ${{ inputs.date }}
+      country: ${{ inputs.country }}
 
   draw-2:
     needs: draw-1
@@ -55,6 +57,7 @@ jobs:
       pause: ${{ inputs.pause }}
       skip_archive: ${{ inputs.skip_archive }}
       date: ${{ inputs.date }}
+      country: ${{ inputs.country }}
 
   draw-3:
     needs: draw-2
@@ -73,3 +76,4 @@ jobs:
       pause: ${{ inputs.pause }}
       skip_archive: ${{ inputs.skip_archive }}
       date: ${{ inputs.date }}
+      country: ${{ inputs.country }}

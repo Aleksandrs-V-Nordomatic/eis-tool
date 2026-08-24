@@ -23,6 +23,7 @@ procurement.
 """
 
 import argparse
+import country
 import json
 import os
 import re
@@ -216,7 +217,40 @@ def main(argv=None):
     p.add_argument("--pack", required=True)
     p.add_argument("--with-images", action="store_true")
 
+    # ONE COMMAND, EITHER COUNTRY. The orchestrators differ because the portals do — EIS
+    # needs shards because it refuses a third of the addresses that ask, and EPPS refuses
+    # none — but a caller should not have to know that. It names a country and a date; the
+    # country picks the road, and the delivery shape either road produces is the same.
+    p = sub.add_parser("day", help="fetch one country's published day into the delivery shape")
+    p.add_argument("date", help="YYYY-MM-DD")
+    p.add_argument("--out", default="work")
+    p.add_argument("--limit", type=int, default=None, help="stop after this many, for a trial")
+    country.add_argument(p)
+
     args = ap.parse_args(argv)
+
+    if args.command == "day":
+        try:
+            code = country.resolve(args.country, os.environ)
+        except country.Mismatch as exc:
+            # A stack trace here would be the tool blaming the caller for a question it
+            # simply has to be asked.
+            print("day: %s" % exc, file=sys.stderr)
+            return 2
+        # The destination carries the country for the same reason the source does: one run
+        # is one country, and neither half is configured where the other cannot see it.
+        out = os.path.join(args.out, code)
+        if code == "LT":
+            import lt_day
+            day, _ = lt_day.run(args.date, out, args.limit)
+        else:
+            print("day: %s has no day runner yet — use batch.py for Latvia" % code,
+                  file=sys.stderr)
+            return 2
+        print("%s %s: %d/%d delivered, %d document(s) -> %s"
+              % (code, day["date"], day["coverage"]["delivered"],
+                 day["coverage"]["targets"], day["counts"]["documents"], out))
+        return 0 if day["complete"] else 1
 
     if args.command == "probe":
         reachable, detail = probe()

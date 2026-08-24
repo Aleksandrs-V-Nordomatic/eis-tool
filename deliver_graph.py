@@ -62,6 +62,7 @@ plainly broke.
 """
 
 import argparse
+import country
 import io
 import json
 import os
@@ -624,10 +625,15 @@ def main(argv=None):
                     help="the version that produced this text; defaults to the pipeline digest")
     ap.add_argument("--run-id", default=os.environ.get("GITHUB_RUN_ID", ""),
                     help="the workflow run this delivery came from")
+    country.add_argument(ap)
     args = ap.parse_args(argv)
 
     drive = env("GRAPH_DRIVE_ID")
-    base = env("GRAPH_DEST_ROOT").strip("/")
+    # DERIVED FROM THE COUNTRY, NOT CONFIGURED BESIDE IT. `GRAPH_DEST_ROOT` names the
+    # project's `work/`; the country folder under it is this run's, and a run that read one
+    # country cannot address another's folder because it never learns the path separately.
+    code = country.resolve(args.country, os.environ)
+    base = country.destination(env("GRAPH_DEST_ROOT"), code)
     tok = graph_token()
 
     root = "%s/%s/shards/eis-batch-shard-%s" % (base, args.date, args.shard)
