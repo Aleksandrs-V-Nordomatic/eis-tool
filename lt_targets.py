@@ -44,7 +44,10 @@ QS = "cft.procedure.type.qs"
 UA = "Mozilla/5.0 (compatible; eis-tool)"
 _ROW = re.compile(r"(?is)<tr[^>]*>(.*?)</tr>")
 _CELL = re.compile(r"(?is)<td[^>]*>(.*?)</td>")
-_ID = re.compile(r"(?:prepareViewCfTWS|viewPmc)\.do\?resourceId=(\d+)")
+# The view a row links to depends on what it is: an ordinary tender, a market
+# consultation, or a standing system. Missing one of them returns an empty list from a
+# response that plainly had rows in it, which is how the doors read as "none open".
+_ID = re.compile(r"(?:prepareViewCfTWS|prepareViewCfTDPSWS|viewPmc)\.do\?resourceId=(\d+)")
 # Java's Date.toString(), which is what the table actually carries: the browser reformats it.
 _STAMP = re.compile(r"^\w{3} (\w{3}) (\d{1,2}) (\d{2}:\d{2}:\d{2}) \w+ (\d{4})$")
 _MONTH = {m: i for i, m in enumerate(

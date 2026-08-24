@@ -39,6 +39,16 @@ import urllib.request
 BASE = "https://viesiejipirkimai.lt/epps"
 PAGE = BASE + "/cft/prepareViewCfTWS.do?resourceId=%s"
 PMC = BASE + "/pmc/viewPmc.do?resourceId=%s"
+# A standing system — a DPS, or a utilities KVS — is linked from the results table to its
+# own view, and THAT VIEW IS NOT SERVED: it answers 500 anonymously and 500 inside the
+# session that ran the search, tried on several ids. Recorded rather than removed,
+# because the next reader will find the link in the table and try exactly this.
+#
+# So a door has no readable card, and therefore no CPV. What it does have is documents:
+# `listContractDocuments` and the archive answer for a door id exactly as they do for a
+# tender. Its facts come from the results row instead, which carries title, buyer,
+# publication, procedure and status — everything but the codes.
+DOOR = BASE + "/cft/prepareViewCfTDPSWS.do?resourceId=%s"
 DOCS = BASE + "/cft/listContractDocuments.do?resourceId=%s"
 # The whole tender in one request. `resourceType` is the portal's own word for the
 # catalogue being asked for, and ContractDocument is the published one.
@@ -105,8 +115,10 @@ def is_published(page):
     The portal answers 200 with its login form in that case, so this reads the body. A page
     that is genuinely a procurement always carries the view's own heading.
     """
-    if "prepareViewCfTWS" not in page and "Peržiūrėti pirkimo" not in page \
-            and "View contract" not in page and "Peržiūrėti rinkos konsultaciją" not in page:
+    headings = ("prepareViewCfTWS", "prepareViewCfTDPSWS", "Peržiūrėti pirkimo",
+                "View contract", "Peržiūrėti rinkos konsultaciją",
+                "Peržiūrėti dinaminę", "Peržiūrėti kvalifikacijos")
+    if not any(heading in page for heading in headings):
         return False
     return not bool(_LOGIN.search(page))
 
@@ -236,7 +248,7 @@ def parse_notice(page, pid, kind="tender"):
         "source": "EPPS",
         "country": "LT",
         "kind": kind,
-        "link": (PMC if kind == "consultation" else PAGE) % pid,
+        "link": view_for(kind) % pid,
         "archive": ARCHIVE % pid,
         "title": field(fields, "title"),
         "buyer": field(fields, "buyer"),
@@ -268,6 +280,11 @@ def parse_notice(page, pid, kind="tender"):
     }
 
 
+def view_for(kind):
+    """Which of the three views carries this kind of resource."""
+    return {"consultation": PMC, "door": DOOR}.get(kind, PAGE)
+
+
 def notice_only(pid, kind="tender"):
     """The card, without the document catalogue — one ~30 KB page.
 
@@ -275,7 +292,7 @@ def notice_only(pid, kind="tender"):
     this first, decides, and only then asks for the tender. Fetching and then discarding
     would cost the portal and us the whole day's bytes to learn nothing.
     """
-    return parse_notice(fetch((PMC if kind == "consultation" else PAGE) % pid), pid, kind)
+    return parse_notice(fetch(view_for(kind) % pid), pid, kind)
 
 
 def collect(pid, kind="tender"):

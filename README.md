@@ -97,7 +97,18 @@ published to, which is the country's own under the runtime root:
 ```
 work/LV/  <date>/{day.json,changes.json}   tenders/<pid>/…
 work/LT/  <date>/{day.json,changes.json}   tenders/<pid>/…
+          plans/{index.json,lines.jsonl}   doors/{index.json,doors.jsonl}
 ```
+
+Lithuania publishes three populations where Latvia publishes one, and only the first is a
+day. `day` takes the window — tenders and market consultations together, told apart by
+procedure. `plans` reads the annual procurement plans buyers file months ahead. `doors`
+lists the dynamic purchasing and qualification systems, which are applications rather than
+bids. The last two are a stock read on demand, not a stream: a system announced once is no
+more interesting on the day it appeared than on any day after.
+
+    python3 eis_tool.py plans  --country LT --policy rules.json
+    python3 eis_tool.py doors  --country LT --policy rules.json
 
 **`GRAPH_DEST_ROOT` names the folder that CONTAINS the country folders, not one of them.**
 The code is appended by the tool. Configuring the full path instead would put the country

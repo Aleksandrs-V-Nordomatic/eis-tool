@@ -225,9 +225,56 @@ def main(argv=None):
     p.add_argument("date", help="YYYY-MM-DD")
     p.add_argument("--out", default="work")
     p.add_argument("--limit", type=int, default=None, help="stop after this many, for a trial")
+    p.add_argument("--policy", default=None,
+                   help="recall policy: JSON, a path to one, or EIS_POLICY from the "
+                        "environment. Absent means fetch everything.")
     country.add_argument(p)
 
+    # The two standing populations. Neither is a day and neither is a tender: a plan says
+    # what a buyer intends to buy months ahead, and a door is a system to qualify into
+    # rather than a competition to enter. Both are read as a stock, on demand.
+    for name, help_text in (("plans", "the annual procurement plans buyers have published"),
+                            ("doors", "dynamic purchasing and qualification systems")):
+        p = sub.add_parser(name, help=help_text)
+        p.add_argument("--out", default="work")
+        p.add_argument("--policy", default=None)
+        p.add_argument("--limit", type=int, default=None)
+        country.add_argument(p)
+
     args = ap.parse_args(argv)
+
+    if args.command in ("plans", "doors"):
+        try:
+            code = country.resolve(args.country, os.environ)
+        except country.Mismatch as exc:
+            print("%s: %s" % (args.command, exc), file=sys.stderr)
+            return 2
+        if code != "LT":
+            # Said plainly rather than answered with an empty list: Latvia publishes no
+            # plan register and no dynamic purchasing systems through EIS, and a reader
+            # handed nothing cannot tell "none" from "not asked".
+            print("%s: %s has no %s register" % (args.command, code, args.command),
+                  file=sys.stderr)
+            return 2
+        out = os.path.join(args.out, code)
+        if args.command == "plans":
+            import lt_plans
+            prior = os.path.join(out, "plans", "index.json")
+            seen = {}
+            if os.path.exists(prior):
+                with open(prior, encoding="utf-8") as fh:
+                    seen = json.load(fh).get("seen") or {}
+            index, _ = lt_plans.harvest(out, args.policy, args.limit, seen)
+            print("plans: %d published, %d read, %d unchanged, %d line(s), %d gated"
+                  % (index["published_plans"], index["buyers_read"],
+                     index["buyers_unchanged"], index["lines_kept"], index["lines_gated"]))
+        else:
+            import lt_doors
+            index, _ = lt_doors.harvest(out, args.policy, limit=args.limit)
+            for which, c in sorted(index["counts"].items()):
+                print("%s: %d open, %d ours" % (which.upper(), c.get("open", 0),
+                                                c.get("ours", 0)))
+        return 0
 
     if args.command == "day":
         try:
@@ -242,7 +289,7 @@ def main(argv=None):
         out = os.path.join(args.out, code)
         if code == "LT":
             import lt_day
-            day, _ = lt_day.run(args.date, out, args.limit)
+            day, _ = lt_day.run(args.date, out, args.limit, policy=args.policy)
         else:
             print("day: %s has no day runner yet — use batch.py for Latvia" % code,
                   file=sys.stderr)
