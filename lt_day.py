@@ -27,12 +27,18 @@ import os
 import time
 
 import lt_fetch
+import lt_page
 import lt_targets
 
 try:
     import changes as changes_mod
 except Exception:
     changes_mod = None
+
+try:
+    import batch as batch_mod
+except Exception:
+    batch_mod = None
 
 
 def _read(path):
@@ -49,7 +55,7 @@ def _write(path, payload):
         json.dump(payload, fh, ensure_ascii=False, indent=2)
 
 
-def run(date, out_root, limit=None, keep=None, run_id=None):
+def run(date, out_root, limit=None, keep=None, run_id=None, policy=None):
     """Fetch the window's procurements into homes and write the day's two files."""
     run_id = run_id or time.strftime("%Y%m%dT%H%M%S+0300", time.localtime())
     stamp = date.replace("-", "/") if "-" not in date else date
@@ -62,13 +68,40 @@ def run(date, out_root, limit=None, keep=None, run_id=None):
     if limit:
         targets = targets[:limit]
 
-    moves, delivered, failed = [], [], []
+    # THE GATE FIRES BEFORE A BYTE MOVES. A card costs about 30 KB and an archive costs
+    # megabytes, so the day reads every card, decides, and only then asks for the tenders
+    # that survived. It is `batch.outside_scope` unchanged — CPV is European and the policy
+    # is a file, so the gate never needed a country of its own.
+    rules = batch_mod.load_policy(policy) if batch_mod is not None else None
+
+    moves, delivered, failed, gated = [], [], [], []
     for target in targets:
         pid = target["pid"]
         home = os.path.join(out_root, "tenders", pid)
         previous = _read(os.path.join(home, "state.json"))
+
+        notice = None
+        if rules is not None:
+            try:
+                notice = lt_page.notice_only(pid, target["kind"])
+            except Exception as exc:
+                failed.append({"pid": pid, "kind": target["kind"],
+                               "reason": "card unreadable: %s" % str(exc)[:160]})
+                continue
+            if notice is None:
+                failed.append({"pid": pid, "kind": target["kind"],
+                               "reason": "not published, or EPPS answered with a login form"})
+                continue
+            if batch_mod.outside_scope(notice, rules):
+                # Named, never merely dropped. A tender nobody fetched and nobody mentioned
+                # reads exactly like a tender that does not exist.
+                gated.append({"pid": pid, "kind": target["kind"], "title": target["title"],
+                              "buyer": target["buyer"],
+                              "cpv": batch_mod.cpv_codes(notice)})
+                continue
+
         try:
-            done = lt_fetch.fetch(pid, out_root, target["kind"])
+            done = lt_fetch.fetch(pid, out_root, target["kind"], notice=notice)
         except Exception as exc:                      # one tender must not lose the day
             failed.append({"pid": pid, "kind": target["kind"], "reason": str(exc)[:200]})
             continue
@@ -105,7 +138,8 @@ def run(date, out_root, limit=None, keep=None, run_id=None):
         "schema": "day-changes/1", "date": date, "country": "LT", "run_id": run_id,
         "written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "complete": not failed,
-        "counts": dict(by_status, tenders=len(moves)),
+        "counts": dict(by_status, tenders=len(moves), gated=len(gated)),
+        "gated": gated,
         "tenders": moves,
     }
     _write(os.path.join(out_root, date, "changes.json"), changes)
@@ -120,8 +154,8 @@ def run(date, out_root, limit=None, keep=None, run_id=None):
         # shards to be missing, so this is the only way it can be short.
         "complete": not failed,
         "coverage": {"targets": len(targets), "delivered": len(delivered),
-                     "failed": len(failed)},
-        "counts": dict(by_status, tenders=len(delivered),
+                     "gated": len(gated), "failed": len(failed)},
+        "counts": dict(by_status, tenders=len(delivered), gated=len(gated),
                        documents=sum(t["documents"] for t in delivered),
                        bytes=sum(t["bytes"] for t in delivered)),
         "lost": failed,
@@ -137,11 +171,15 @@ def main(argv=None):
     ap.add_argument("--out", default="work/LT")
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--only", choices=("tender", "consultation"), default=None)
+    ap.add_argument("--policy", default=None,
+                    help="recall policy: JSON, a path to one, or EIS_POLICY from "
+                         "the environment. Absent means fetch everything.")
     args = ap.parse_args(argv)
     day, changes = run(args.date, args.out, args.limit,
-                       keep=(args.only,) if args.only else None)
-    print("%s: %d/%d delivered, %d document(s), %.1f MB — %s"
+                       keep=(args.only,) if args.only else None, policy=args.policy)
+    print("%s: %d/%d delivered, %d gated, %d document(s), %.1f MB — %s"
           % (day["date"], day["coverage"]["delivered"], day["coverage"]["targets"],
+             day["coverage"]["gated"],
              day["counts"]["documents"], day["counts"]["bytes"] / 1048576.0,
              "complete" if day["complete"] else "SHORT"))
     for row in changes["tenders"]:

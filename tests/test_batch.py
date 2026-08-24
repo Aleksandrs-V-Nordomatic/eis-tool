@@ -561,3 +561,57 @@ class ShardsOutsideTheRequest(unittest.TestCase):
             seen += batch.take_shard(targets, shard, 2)
         self.assertEqual(sorted(seen), sorted(targets))
         self.assertEqual(len(seen), len(set(seen)))
+
+
+class OverriddenCodes(unittest.TestCase):
+    """A code that survives its own excluded division.
+
+    The exclusions ask what the buyer classified a purchase as, and 62% of live
+    procurements carry one code only — so a control-system contract filed under software
+    services or alarm monitoring has its whole code set inside an excluded division and is
+    dropped before a byte moves. Measured on the Lithuanian day of 20 August 2026: `33894
+    ADMS SCADA programinės įrangos priežiūros paslaugos`, SCADA maintenance, carried
+    `72250000` and nothing else. Whether such a tender is ours is a later question; the
+    gate's job is only to stop deciding it in advance.
+    """
+
+    def policy(self, **extra):
+        return batch.load_policy(json.dumps(dict(
+            {"recall_title_terms": ["scada", "signalizacij"],
+             "hard_exclude_prefixes": ["72", "79"]}, **extra)))
+
+    def notice(self, title, *codes):
+        return {"title": title, "cpv": list(codes)}
+
+    def test_without_an_override_an_excluded_division_drops_it(self):
+        self.assertTrue(batch.outside_scope(
+            self.notice("ADMS SCADA priežiūros paslaugos", "72250000"), self.policy()))
+
+    def test_an_override_keeps_it_despite_the_division(self):
+        self.assertFalse(batch.outside_scope(
+            self.notice("ADMS SCADA priežiūros paslaugos", "72250000"),
+            self.policy(override_prefixes=["72250"])))
+
+    def test_one_overridden_code_is_enough_among_several(self):
+        self.assertFalse(batch.outside_scope(
+            self.notice("signalizacijos stebėjimas", "79711000", "79999000"),
+            self.policy(override_prefixes=["79711"])))
+
+    def test_an_override_does_not_rescue_an_excluded_title(self):
+        """The title veto is the buyer's own words and outranks a code."""
+        self.assertTrue(batch.outside_scope(
+            self.notice("maisto produktai SCADA", "72250000"),
+            self.policy(override_prefixes=["72250"],
+                        hard_exclude_title_terms=["maisto produkt"])))
+
+    def test_an_override_does_not_rescue_a_title_with_nothing_we_do_in_it(self):
+        """It undoes the code veto, not the recall test — otherwise every overridden
+        division would arrive whole."""
+        self.assertTrue(batch.outside_scope(
+            self.notice("kanceliarinės prekės", "72250000"),
+            self.policy(override_prefixes=["72250"])))
+
+    def test_a_policy_written_before_overrides_existed_still_loads(self):
+        rules = self.policy()
+        self.assertEqual(len(rules), 4)
+        self.assertEqual(rules[3], ())

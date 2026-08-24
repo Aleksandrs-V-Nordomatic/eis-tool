@@ -110,6 +110,8 @@ def unpack(data, home, notice):
                 "member": member,
                 "download": (entry or {}).get("download"),
                 "files": [{"filename": filename,
+                           # `path` is what the extractor opens, relative to the home.
+                           "path": "originals/%s" % filename,
                            "original_name": bare,
                            "sha256": _sha256(payload),
                            "bytes": len(payload)}],
@@ -137,7 +139,68 @@ def split_generated(records):
     return documents, generated
 
 
-def fetch(pid, out_root, kind="tender"):
+def extract(home):
+    """Turn the originals into Markdown, then give each one its permanent address.
+
+    `normalize.py` is the same code for both countries and knows nothing about either — it
+    reads `manifest.json` and writes `normalized/`. What it does not do is name the results
+    the way a reader addresses them, so that happens here: `doc/<digest>.md`, where the
+    digest is `changes.document_key` over the ORIGINAL bytes and the document's place. An
+    unchanged document therefore keeps the same address forever and costs nothing to
+    re-deliver, and a superseded one stays readable instead of being overwritten.
+    """
+    try:
+        import normalize
+    except ImportError as exc:
+        return {"documents": [], "unreadable_files": [],
+                "skipped": "normalize unavailable: %s" % exc}
+
+    out = os.path.join(home, "normalized")
+    argv = ["--in", home, "--out", out]
+    stdout = sys.stdout
+    try:
+        sys.stdout = io.StringIO()             # the extractor narrates; a fetch does not
+        normalize.main(argv)
+    finally:
+        sys.stdout = stdout
+
+    with open(os.path.join(out, "manifest_normalized.json"), encoding="utf-8") as fh:
+        normalized = json.load(fh)
+
+    doc_dir = os.path.join(home, "doc")
+    os.makedirs(doc_dir, exist_ok=True)
+    for entry in normalized.get("documents", []):
+        if entry.get("also_listed_under") or not entry.get("markdown_path"):
+            continue
+        source = os.path.join(out, entry["markdown_path"])
+        if not os.path.exists(source):
+            continue
+        key = (changes_mod.document_key(entry.get("original_sha256"), entry.get("source"))
+               if changes_mod else entry.get("original_sha256", "")[:16])
+        with open(source, encoding="utf-8") as fh:
+            text = fh.read()
+        with open(os.path.join(doc_dir, "%s.md" % key), "w", encoding="utf-8") as fh:
+            fh.write(text)
+        entry["doc"] = "doc/%s.md" % key
+    return normalized
+
+
+def _with_text(documents, normalized):
+    """Point each catalogue entry at the Markdown its bytes produced."""
+    by_sha = {}
+    for entry in normalized.get("documents", []):
+        if entry.get("doc"):
+            by_sha.setdefault(entry.get("original_sha256"), []).append(entry)
+    out = []
+    for row in documents:
+        texts = by_sha.get(row["sha256"], [])
+        out.append(dict(row,
+                        doc=texts[0]["doc"] if texts else None,
+                        chars=sum(t.get("markdown_chars", 0) for t in texts) or None))
+    return out
+
+
+def fetch(pid, out_root, kind="tender", with_text=True, notice=None):
     """One tender into `<out_root>/tenders/<pid>/`, in the delivery shape.
 
     `index.json` is written LAST and `state.json` after it, exactly as the Latvian side
@@ -145,7 +208,10 @@ def fetch(pid, out_root, kind="tender"):
     fingerprint that landed before the documents it vouches for would let the next run skip
     text that is not there.
     """
-    notice = lt_page.collect(pid, kind)
+    notice = notice or lt_page.collect(pid, kind)
+    if notice is not None and "documents" not in notice:
+        # A caller that gated on the card hands it back; only the catalogue is still owed.
+        notice["documents"] = lt_page.parse_documents(lt_page.fetch(lt_page.DOCS % pid), pid)
     if notice is None:
         raise RuntimeError("lt_fetch: %s is not published, or EPPS answered with a login "
                            "form" % pid)
@@ -163,7 +229,7 @@ def fetch(pid, out_root, kind="tender"):
     documents, generated = split_generated(records)
     # `documents` is what the fingerprint reads. `generated` rides along in the manifest
     # under a key it does not look at, so the files are delivered without being compared.
-    manifest = {"pid": str(pid), "archive": archive_name,
+    manifest = {"pid": str(pid), "procurement_id": str(pid), "archive": archive_name,
                 "archive_sha256": _sha256(data), "archive_bytes": len(data),
                 "documents": documents, "generated": generated, "withheld_records": []}
     _write(home, "procurement.json", notice)
@@ -199,10 +265,17 @@ def fetch(pid, out_root, kind="tender"):
     }
     _write(home, "index.json", index)
 
+    normalized = extract(home) if with_text else {"documents": [], "unreadable_files": []}
+    if normalized.get("documents"):
+        index["documents"] = _with_text(index["documents"], normalized)
+        index["text_documents"] = sum(1 for e in normalized["documents"]
+                                      if e.get("markdown_path"))
+        index["chars"] = normalized.get("chars", 0)
+        _write(home, "index.json", index)          # rewritten with the text it now names
+
     state = None
     if changes_mod is not None:
-        state = changes_mod.fingerprint(pid, notice, manifest, {"documents": [],
-                                                               "unreadable_files": []})
+        state = changes_mod.fingerprint(pid, notice, manifest, normalized)
         _write(home, "state.json", state)
     return {"pid": str(pid), "kind": kind, "home": home,
             "documents": len(records), "catalogued": len(catalogue),

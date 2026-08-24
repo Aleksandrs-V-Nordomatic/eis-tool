@@ -123,7 +123,14 @@ def load_policy(source=None):
         return None                       # incomplete policy must fail open, never drop all
     return (recall,
             tuple(policy.get("hard_exclude_prefixes") or ()),
-            tuple(t.casefold() for t in (policy.get("hard_exclude_title_terms") or ())))
+            tuple(t.casefold() for t in (policy.get("hard_exclude_title_terms") or ())),
+            # CODES THAT SURVIVE THEIR OWN DIVISION. A control-system contract can carry a
+            # main code inside an excluded division and nothing else — `72250000` software
+            # services on a SCADA maintenance contract, `79711000` on an alarm-monitoring
+            # one — and 62% of live procurements carry one code only. Without an override
+            # such a notice is dropped before a byte moves, which is the one failure the
+            # exclusions are least allowed to cause.
+            tuple(policy.get("override_prefixes") or ()))
 
 def cpv_codes(notice):
     """Every CPV code a notice carries, however the source spelled them."""
@@ -142,14 +149,21 @@ def outside_scope(notice, policy):
     """Should this notice be excluded before any documents are fetched?"""
     if not policy:
         return False
-    recall_terms, exclude_prefixes, exclude_title_terms = policy
+    # Older policies carry three fields; the override list is the fourth and optional.
+    recall_terms, exclude_prefixes, exclude_title_terms = policy[:3]
+    override_prefixes = policy[3] if len(policy) > 3 else ()
 
     title = str(notice.get("title") or notice.get("name") or "").casefold()
     if title and any(term in title for term in exclude_title_terms):
         return True
 
     codes = cpv_codes(notice)
-    if codes and exclude_prefixes and all(c.startswith(exclude_prefixes) for c in codes):
+    # An override is read anyway, wherever its division sits. The gate asks what the buyer
+    # classified this as; whether the work is ours is a later and different question.
+    overridden = bool(override_prefixes) and any(c.startswith(override_prefixes)
+                                                 for c in codes)
+    if (codes and exclude_prefixes and not overridden
+            and all(c.startswith(exclude_prefixes) for c in codes)):
         return True
 
     if not title:

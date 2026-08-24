@@ -261,13 +261,26 @@ def parse_notice(page, pid, kind="tender"):
         "plan_ref": field(fields, "plan_ref"),
         "cpv_main": cpv[0] if cpv else None,
         "cpv_additional": cpv[1:],
+        # `batch.cpv_codes` looks under `cpv` for the whole set. Named here so the gate that
+        # already works for Latvia works unchanged, rather than growing a country branch.
+        "cpv": cpv,
         "fields": fields,
     }
 
 
+def notice_only(pid, kind="tender"):
+    """The card, without the document catalogue — one ~30 KB page.
+
+    THE GATE HAS TO FIRE BEFORE A BYTE MOVES, and an archive is megabytes. So a run reads
+    this first, decides, and only then asks for the tender. Fetching and then discarding
+    would cost the portal and us the whole day's bytes to learn nothing.
+    """
+    return parse_notice(fetch((PMC if kind == "consultation" else PAGE) % pid), pid, kind)
+
+
 def collect(pid, kind="tender"):
     """The notice and its catalogue, from the two pages that carry them."""
-    notice = parse_notice(fetch((PMC if kind == "consultation" else PAGE) % pid), pid, kind)
+    notice = notice_only(pid, kind)
     if notice is None:
         return None
     notice["documents"] = parse_documents(fetch(DOCS % pid), pid)
