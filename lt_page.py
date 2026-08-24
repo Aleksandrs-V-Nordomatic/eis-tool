@@ -260,7 +260,7 @@ def parse_notice(page, pid, kind="tender"):
         "docs_until": field(fields, "docs_until"),
         "published": field(fields, "published"),
         "status": field(fields, "status"),
-        "procedure": field(fields, "procedure"),
+        "procedure": field(fields, "procedure") or KIND_PROCEDURE.get(kind),
         "work_kind": field(fields, "work_kind"),
         "legal_basis": field(fields, "legal_basis"),
         "threshold": field(fields, "threshold"),
@@ -278,6 +278,15 @@ def parse_notice(page, pid, kind="tender"):
         "cpv": cpv,
         "fields": fields,
     }
+
+
+# What the portal calls a resource that is not an ordinary competition. The consultation view
+# does not print `Pirkimo būdas` at all — it is a different view of a different thing — so the
+# field comes back empty and the card's `Iepirkuma veids` with it. That column is also what says
+# which of the three kinds a card is, so an empty one loses the distinction entirely. This is
+# derived, not guessed: a resource served from the PMC view IS a market consultation, and that is
+# the portal's own name for it.
+KIND_PROCEDURE = {"consultation": "Rinkos konsultacija"}
 
 
 def view_for(kind):

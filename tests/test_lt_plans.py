@@ -117,3 +117,33 @@ class TheLineAReaderGets(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ProcedureIsNeverEmptyForAKindThatHasOne(unittest.TestCase):
+    """`Iepirkuma veids` is also what says which of the three kinds a card is.
+
+    The consultation view does not print `Pirkimo būdas` — it is a different view of a
+    different thing — so the field parses empty and the column with it, and the card loses
+    the one thing that distinguishes a consultation from a competition. Derived, not
+    guessed: a resource served from the PMC view is a market consultation.
+    """
+
+    def notice(self, kind, page="Peržiūrėti rinkos konsultaciją\nPavadinimas:\nBandymas"):
+        import lt_page
+        return lt_page.parse_notice(page, "1", kind)
+
+    def test_a_consultation_carries_its_procedure_without_the_page_saying_so(self):
+        self.assertEqual(self.notice("consultation")["procedure"], "Rinkos konsultacija")
+
+    def test_a_competition_is_left_alone(self):
+        """Nothing is invented for a kind whose page does print the field."""
+        import lt_page
+        page = "Peržiūrėti pirkimo\nPavadinimas:\nBandymas"
+        self.assertIsNone(lt_page.parse_notice(page, "1", "tender")["procedure"])
+
+    def test_the_page_wins_when_it_says_anything(self):
+        import lt_page
+        page = ("Peržiūrėti rinkos konsultaciją\nPavadinimas:\nBandymas\n"
+                "Pirkimo būdas:\nAtviras konkursas")
+        self.assertEqual(lt_page.parse_notice(page, "1", "consultation")["procedure"],
+                         "Atviras konkursas")
