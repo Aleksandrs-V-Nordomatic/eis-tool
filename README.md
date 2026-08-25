@@ -123,6 +123,38 @@ portal that refuses a third of them. EPPS refuses none and serves each tender as
 archive, so its day is written directly rather than reconciled from shard indexes — the
 same two files, arrived at without the machinery that Latvia cannot do without.
 
+### Each country has its own lane all the way to the drive
+
+    eis-batch.yml → batch.py       → deliver_graph.py     Latvia, four shards
+    lt-day.yml    → eis_tool.py day → deliver_lt.py       Lithuania, one pass
+
+They are separate because the delivery is, and the delivery is separate for reasons that
+were each found by asking what the Latvian one would do to a Lithuanian tender:
+
+- `deliver_graph` **rebuilds** `index.json` from `procurement.json` and the normalized
+  manifest. Lithuania's index is not derivable from those — it carries the amendment
+  number that placed each document and the address a person clicks, both read off the EPPS
+  catalogue and both gone by the time `procurement.json` is written. `deliver_lt` ships the
+  index the fetch already wrote.
+- `deliver_graph.download_url` is a literal `https://www.eis.gov.lv/EKEIS/Document/…`.
+  Pointed at Lithuania it does not fail; it stamps a working Latvian URL shape onto a
+  Lithuanian procurement, and the card links to a document that is not the one it names.
+- A shard is in `deliver_graph`'s path, and Lithuania has no shards.
+
+**The change comparison happens at delivery, against the drive.** `lt_day` compares each
+procurement with `state.json` in its own home, which is right on a workstation that keeps
+`work/` and worthless on a runner, whose disk is new every night: every procurement would
+come back `new`, for ever, and `changes.json` would be a copy of the day. The drive is the
+only durable thing in the arrangement, so `deliver_lt` reads the stored state back out of
+it — exactly as `deliver_graph` already does — and rewrites the day's verdict before
+uploading it. `compared_against: "drive"` in the delivered `changes.json` says so.
+
+**The gate is required, not optional, in the scheduled lane.** `batch.load_policy` fails
+open by design: an unreadable policy returns `None` rather than dropping everything. Inside
+a library that is right; for an unattended night it would mean fetching every archive the
+window holds from a state portal because a secret was misspelt. `lt-day.yml` therefore
+checks that the policy parses before the portal is touched, and stops if it does not.
+
 ## What gets published
 
 A tender has one home. A day is a list of what moved. This shape is the tool's own and is

@@ -275,7 +275,16 @@ def fetch(pid, out_root, kind="tender", with_text=True, notice=None):
 
     state = None
     if changes_mod is not None:
-        state = changes_mod.fingerprint(pid, notice, manifest, normalized)
+        # STAMPED WITH THE VERSIONS THAT PRODUCED IT, and with LITHUANIA'S parser. Left
+        # unstamped, a fingerprint cannot tell a buyer's amendment from our own extractor
+        # being upgraded under a procurement that never moved; stamped with Latvia's
+        # parser, an `lt_page` improvement changes facts across the whole corpus in one
+        # night and every one of them is reported as an amendment somebody made.
+        import country as country_mod
+        state = changes_mod.fingerprint(
+            pid, notice, manifest, normalized,
+            tool=changes_mod.pipeline_version(),
+            parser=changes_mod.parser_version(files=country_mod.parser_files("LT")))
         _write(home, "state.json", state)
     return {"pid": str(pid), "kind": kind, "home": home,
             "documents": len(records), "catalogued": len(catalogue),

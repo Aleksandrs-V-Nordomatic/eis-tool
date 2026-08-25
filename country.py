@@ -96,6 +96,19 @@ def destination(base, code):
     return "%s/%s" % (trimmed, code)
 
 
+def parser_files(code):
+    """The files that decide this country's facts, for the version stamped beside them.
+
+    `changes` records a parser version so that an improvement to a page reader — one more
+    spelling of a label, a field that used to come back null — is not reported as an
+    amendment on every procurement in the corpus. That only works if the version follows
+    the reader the run actually used: stamping Latvia's digest onto a Lithuanian
+    fingerprint makes an `lt_page` edit invisible and an `eis_page` edit a false alarm, in
+    the same run and for the same reason.
+    """
+    return (SOURCES[resolve(code)]["page"] + ".py",)
+
+
 def describe(code):
     """What a report says about the country it ran for."""
     entry = SOURCES[resolve(code)]

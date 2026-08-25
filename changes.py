@@ -140,9 +140,14 @@ def pipeline_version(root=None):
     return _digest(root, PIPELINE_FILES)
 
 
-def parser_version(root=None):
-    """A digest of the page parser — what decides the facts read off a procurement page."""
-    return _digest(root, PARSER_FILES)
+def parser_version(root=None, files=None):
+    """A digest of the page parser — what decides the facts read off a procurement page.
+
+    `files` names which parser, because there is now more than one and they move
+    independently: `country.parser_files(code)` gives the pair for a country. It defaults
+    to Latvia's, which is what every caller written before the second country meant.
+    """
+    return _digest(root, files or PARSER_FILES)
 
 
 def document_key(original_sha256, source):

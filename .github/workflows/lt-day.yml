@@ -1,0 +1,115 @@
+name: lt-day
+
+# One Lithuanian day, fetched and delivered.
+#
+# WHY THIS IS NOT `eis-batch`. Latvia's day is four runners drawing four addresses at a
+# portal that refuses about a third of them, each shard retrying its own chain, and a
+# `collect` job afterwards reconciling four shard indexes into one list. EPPS refuses none
+# and serves each procurement as a single archive, so none of that machinery has anything
+# to do here: one runner, one pass, and the day's two files written directly.
+#
+# Pointing `eis-batch` at `country: LT` is the thing this file exists to make unnecessary.
+# That input reaches only the DELIVERY step; the fetch below it is `batch.py`, which speaks
+# EIS and nothing else. The run would fetch Latvia, file it under `work/LT/`, and report
+# success — the failure `country.py` was written against.
+
+on:
+  # NO SCHEDULE, DELIBERATELY — the same reasoning as `eis-batch.yml`. The consumer that
+  # reads the day is the one that starts it, so there is exactly one actor per day and no
+  # second, redundant fetch of the same window. GitHub's cron is a wish that can fire hours
+  # late, and nothing that must finish before a fixed hour can be built on it.
+  workflow_dispatch:
+    inputs:
+      date:
+        description: "The day to fetch, YYYY-MM-DD in Vilnius. The caller owns it; blank means the runner's UTC date"
+        required: false
+        default: ""
+      limit:
+        description: "Stop after this many procurements — for a trial run, not for a night"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+# One run per day, for the same reason Latvia has one: two runs are two draws at a state
+# portal and two `day.json` files for one date, the second describing less than the first.
+concurrency:
+  group: lt-day
+  cancel-in-progress: false
+
+jobs:
+  day:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    # The same pinned toolchain Latvia uses. LibreOffice reads the Word 97 attachments
+    # buyers still send, p7zip opens the .7z a building project arrives in, and Tesseract
+    # reads the scans — none of which `apt-get` on the day would install at a fixed version.
+    container:
+      image: ${{ vars.TOOLCHAIN_IMAGE }}
+    steps:
+      # Pinned to a full SHA because this repository's Actions policy allows nothing else.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Test
+        run: python3 -m unittest discover -s tests -t tests
+
+      # THE GATE IS CHECKED BEFORE THE PORTAL IS TOUCHED, AND THIS STEP IS WHY IT IS A STEP.
+      # `batch.load_policy` fails open on purpose — an unreadable policy returns None rather
+      # than dropping every procurement, which is the right call inside a library. For an
+      # unattended night it is the wrong outcome: no gate means fetching every archive the
+      # window holds, roughly 119 of them, from a state portal, because a secret was
+      # misspelt. So the policy is required to parse here, and the run stops if it does not.
+      - name: The recall policy, and how much of the day it lets through
+        env:
+          LT_POLICY: ${{ secrets.LT_POLICY }}
+        run: |
+          if [ -n "$LT_POLICY" ]; then
+            printf '%s' "$LT_POLICY" > policy.json
+            echo "policy: from the repository secret"
+          else
+            cp lt_policy.example.json policy.json
+            echo "::warning::no LT_POLICY secret — running on the committed example policy, which over-recalls"
+          fi
+          python3 -c "
+          import sys, batch
+          rules = batch.load_policy('policy.json')
+          if rules is None:
+              sys.exit('the recall policy did not parse — refusing to fetch the whole day ungated')
+          recall, excl_cpv, excl_title, override = rules
+          print('policy: %d recall term(s), %d excluded division(s), %d excluded title term(s), %d override(s)'
+                % (len(recall), len(excl_cpv), len(excl_title), len(override)))
+          "
+
+      - name: Fetch the day
+        env:
+          EIS_POLICY: policy.json
+          EIS_COUNTRY: LT
+          RUN_DATE: ${{ inputs.date }}
+          LIMIT: ${{ inputs.limit }}
+        run: |
+          DAY="${RUN_DATE:-$(date -u +%F)}"
+          echo "fetching the Lithuanian window for $DAY"
+          python3 eis_tool.py day "$DAY" --out work ${LIMIT:+--limit $LIMIT} --policy policy.json
+
+      # The day is on the runner's disk and the runner is about to disappear. Everything
+      # after this line is what makes it a day somebody can read tomorrow — and, because the
+      # comparison against the drive happens inside it, what makes "what moved" mean
+      # anything at all on the second night.
+      #
+      # Silent about where it writes: every coordinate is a secret and the script prints
+      # counts rather than paths. With no secrets configured the step does not run and the
+      # workflow stays usable by anyone without carrying anybody's addresses.
+      - name: Deliver the day where the reader can reach it
+        if: ${{ success() && env.HAVE_GRAPH == 'true' }}
+        env:
+          HAVE_GRAPH: ${{ secrets.GRAPH_DRIVE_ID != '' }}
+          GRAPH_TENANT_ID: ${{ secrets.GRAPH_TENANT_ID }}
+          GRAPH_CLIENT_ID: ${{ secrets.GRAPH_CLIENT_ID }}
+          GRAPH_CLIENT_SECRET: ${{ secrets.GRAPH_CLIENT_SECRET }}
+          GRAPH_DRIVE_ID: ${{ secrets.GRAPH_DRIVE_ID }}
+          GRAPH_DEST_ROOT: ${{ secrets.GRAPH_DEST_ROOT }}
+          EIS_COUNTRY: LT
+          RUN_DATE: ${{ inputs.date }}
+        run: |
+          python3 deliver_lt.py --out work --date "${RUN_DATE:-$(date -u +%F)}"
