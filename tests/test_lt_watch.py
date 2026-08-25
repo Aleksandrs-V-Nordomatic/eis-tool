@@ -142,15 +142,87 @@ class TheWatchListRidesWithTheWindow(unittest.TestCase):
         self.assertIn("999", stubs.fetched)
 
     def test_a_watched_card_no_view_serves_is_named_not_silently_dropped(self):
-        stubs = Stubs(window=[], served={})
+        window = [{"pid": "111", "kind": "tender", "title": "t", "buyer": "b",
+                   "published": "2026-08-20"}]
+        stubs = Stubs(window=window, served={"111": ("tender",)})
         day, changes = self.go(stubs, watch=["404"])
 
-        self.assertEqual(stubs.fetched, [])
+        self.assertEqual(stubs.fetched, ["111"])
         lost = day["lost"]
         self.assertEqual(len(lost), 1)
         self.assertEqual(lost[0]["pid"], "404")
         self.assertTrue(lost[0]["watched"])
+        self.assertEqual(day["coverage"]["watch_holes"], 1)
+
+    def test_a_hole_in_the_watch_does_not_make_the_window_short(self):
+        """The day is the window; a watched card is a standing question asked of it.
+
+        A card whose resource no view will serve stays on the board until a person deals with
+        it, so letting it mark the day incomplete would mark EVERY night incomplete until then
+        — and a flag that is always on is a flag nobody reads on the night it starts meaning
+        something.
+        """
+        window = [{"pid": "111", "kind": "tender", "title": "t", "buyer": "b",
+                   "published": "2026-08-20"}]
+        stubs = Stubs(window=window, served={"111": ("tender",)})
+        day, changes = self.go(stubs, watch=["404"])
+
+        self.assertTrue(day["complete"])
+        self.assertEqual(day["coverage"]["failed"], 0)
+
+    def test_a_window_target_that_fails_does_make_the_day_short(self):
+        window = [{"pid": "111", "kind": "tender", "title": "t", "buyer": "b",
+                   "published": "2026-08-20"},
+                  {"pid": "222", "kind": "tender", "title": "t", "buyer": "b",
+                   "published": "2026-08-20"}]
+        stubs = Stubs(window=window, served={"111": ("tender",)})   # 222 is served by nothing
+        day, changes = self.go(stubs)
+
         self.assertFalse(day["complete"])
+        self.assertEqual(day["coverage"]["failed"], 1)
+
+
+class AnEmptyWindowIsBrokenDiscovery(unittest.TestCase):
+    """Zero is not a number EPPS produces, and nothing else in the chain would say so.
+
+    Lithuania publishes on the order of a hundred resources a working day and thirteen on a
+    Sunday. What produces zero is our own crawl breaking — the results table gaining a column,
+    the displaytag page parameter changing under a redeploy — and each of those returns an
+    empty list rather than an error. Unremarked it is a green run, a complete day, an empty
+    morning, and nothing to tell it from a holiday.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.out = os.path.join(self.tmp, "LT")
+
+    def go(self, stubs, watch=None):
+        stubs.install(self)
+        return lt_day.run("2026-08-20", self.out, policy="{}", watch=watch)
+
+    def test_an_empty_window_is_not_a_complete_day(self):
+        day, changes = self.go(Stubs(window=[], served={}))
+
+        self.assertTrue(day["discovery_failed"])
+        self.assertFalse(day["complete"])
+        self.assertFalse(changes["complete"])
+        self.assertEqual(day["coverage"]["targets"], 0)
+
+    def test_a_window_that_found_something_is_not_flagged(self):
+        window = [{"pid": "111", "kind": "tender", "title": "t", "buyer": "b",
+                   "published": "2026-08-20"}]
+        day, changes = self.go(Stubs(window=window, served={"111": ("tender",)}))
+
+        self.assertFalse(day["discovery_failed"])
+        self.assertTrue(day["complete"])
+
+    def test_a_watch_list_does_not_disguise_an_empty_window(self):
+        """The watch list is not discovery, and it must not stand in for it."""
+        day, changes = self.go(Stubs(window=[], served={"999": ("tender",)}), watch=["999"])
+
+        self.assertTrue(day["discovery_failed"])
+        self.assertFalse(day["complete"])
+        self.assertEqual(day["counts"]["watched"], 1)
 
     def test_the_kind_is_asked_of_the_portal_not_of_the_card(self):
         # A consultation, whose id looks exactly like a competition's.

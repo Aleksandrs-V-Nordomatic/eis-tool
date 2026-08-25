@@ -155,6 +155,20 @@ a library that is right; for an unattended night it would mean fetching every ar
 window holds from a state portal because a secret was misspelt. `lt-day.yml` therefore
 checks that the policy parses before the portal is touched, and stops if it does not.
 
+**An empty window is reported as broken, not as quiet.** Lithuania publishes on the order of a
+hundred resources a working day and thirteen on a Sunday; zero is not something EPPS does. What
+produces zero is the crawl breaking — the results table gaining a column, the displaytag page
+parameter changing under a redeploy — and each of those returns an empty list rather than an
+error. So `day.json` carries `discovery_failed` and refuses to call itself complete, because the
+alternative is a green run, a complete day, an empty morning, and nothing to tell it from a
+holiday.
+
+**A hole in the watch is not the day arriving short.** The day is the window; a watched card is a
+standing question asked of it. A watched resource no view will serve is counted in
+`coverage.watch_holes` and named in `lost`, and it leaves `complete` alone — otherwise every
+night would be incomplete until somebody edited the board, and a flag that is always on is one
+nobody reads on the night it starts meaning something.
+
 **And the policy comes from the secret or the run does not happen.** Both `*_policy.example.json`
 files in this repository are deliberately unrelated illustrations — office printing — so that a
 public repository discloses nothing about what any deployment actually hunts for. They exist to

@@ -91,6 +91,14 @@ def run(date, out_root, limit=None, keep=None, run_id=None, policy=None, watch=N
     window = "%s/%s/%s" % (d, m, y)
 
     targets = lt_targets.day(window, window)
+    # AN EMPTY WINDOW IS NOT A QUIET DAY, AND NOTHING ELSE WILL EVER SAY SO. Lithuania
+    # publishes on the order of a hundred resources a working day and thirteen on a Sunday;
+    # zero has never been observed and is not a thing EPPS does. What produces zero is our
+    # own discovery breaking — the results table gaining a column, or the displaytag page
+    # parameter changing when the portal is redeployed — and every one of those failures
+    # returns an empty list rather than an error. Left unremarked it becomes a green run, a
+    # complete day, an empty morning, and nothing anywhere to distinguish it from a holiday.
+    discovery_failed = not targets
     if keep:
         targets = [t for t in targets if t["kind"] in keep]
     if limit:
@@ -191,10 +199,20 @@ def run(date, out_root, limit=None, keep=None, run_id=None, policy=None, watch=N
         by_status[row["status"]] = by_status.get(row["status"], 0) + 1
     watched_count = sum(1 for row in moves if row["watched"])
 
+    # WHOSE FAILURE MAKES A DAY SHORT. The day is the window; a watched card is a standing
+    # question somebody asked of it. A watched resource no view will serve is a hole in the
+    # watch and must be reported as one — but it is not the window arriving short, and
+    # letting it say so would mark every night incomplete until a person edited the board,
+    # which teaches a reader to ignore the flag exactly when it starts meaning something.
+    lost_window = [f for f in failed if not f.get("watched")]
+    lost_watch = [f for f in failed if f.get("watched")]
+    complete = not lost_window and not discovery_failed
+
     changes = {
         "schema": "day-changes/1", "date": date, "country": "LT", "run_id": run_id,
         "written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "complete": not failed,
+        "complete": complete,
+        "discovery_failed": discovery_failed,
         "counts": dict(by_status, tenders=len(moves), gated=len(gated),
                            watched=watched_count),
         "gated": gated,
@@ -208,11 +226,16 @@ def run(date, out_root, limit=None, keep=None, run_id=None, policy=None, watch=N
         "written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "changes_path": "%s/changes.json" % date,
         "tenders_path": "tenders",
-        # A day is complete when every target the window named reached a home. There are no
-        # shards to be missing, so this is the only way it can be short.
-        "complete": not failed,
+        # A day is complete when the window was discovered at all and every target it named
+        # reached a home. There are no shards to be missing, so those are the only two ways
+        # it can be short.
+        "complete": complete,
+        # Said outright rather than inferred from a zero, because a reader looking at
+        # `targets: 0` cannot tell a broken crawl from a day nobody published on.
+        "discovery_failed": discovery_failed,
         "coverage": {"targets": len(targets), "delivered": len(delivered),
-                     "gated": len(gated), "failed": len(failed)},
+                     "gated": len(gated), "failed": len(lost_window),
+                     "watch_holes": len(lost_watch)},
         "counts": dict(by_status, tenders=len(delivered), gated=len(gated),
                        watched=watched_count,
                        documents=sum(t["documents"] for t in delivered),

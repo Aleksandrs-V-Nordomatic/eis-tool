@@ -136,10 +136,12 @@ def day(root, pids):
                for p in pids]
     with open(os.path.join(root, DATE, "day.json"), "w", encoding="utf-8") as fh:
         json.dump({"schema": "day/1", "date": DATE, "country": "LT", "source": "EPPS",
-                   "tenders": tenders, "complete": True}, fh)
+                   "tenders": tenders, "complete": True, "lost": [],
+                   "coverage": {"targets": len(pids), "delivered": len(pids),
+                                "gated": 0, "failed": 0}}, fh)
     with open(os.path.join(root, DATE, "changes.json"), "w", encoding="utf-8") as fh:
         json.dump({"schema": "day-changes/1", "date": DATE, "country": "LT",
-                   "counts": {"new": len(pids)}, "gated": [],
+                   "counts": {"new": len(pids)}, "gated": [], "complete": True,
                    "tenders": [dict(t, moved=[]) for t in tenders]}, fh)
 
 
@@ -258,6 +260,37 @@ class DeliverLithuania(unittest.TestCase):
 
         self.assertGreater(self.drive.order.index("work/LT/%s/day.json" % DATE),
                            self.drive.order.index("work/LT/%s/changes.json" % DATE))
+
+    def test_a_home_that_never_arrived_is_taken_out_of_the_day(self):
+        """A day may be short. It may not be wrong.
+
+        Left in, `day.json` would name a home that is not on the drive, carry the local guess
+        of `new` for it, and still call itself complete — so a reader would ask the drive for
+        an archive nobody uploaded and get a 404 in the middle of a night that reported
+        success.
+        """
+        home(self.root, "9320336", [("TS.docx", "specifikacija", "aa")])
+        day(self.root, ["9320336", "8888888"])          # the second was never fetched
+        self.deliver()
+
+        served = json.loads(self.drive.uploaded["work/LT/%s/day.json" % DATE])
+        self.assertEqual([t["pid"] for t in served["tenders"]], ["9320336"])
+        self.assertFalse(served["complete"])
+        self.assertEqual([l["pid"] for l in served["lost"]], ["8888888"])
+        self.assertEqual(served["coverage"]["undelivered"], 1)
+
+        moved = json.loads(self.drive.uploaded["work/LT/%s/changes.json" % DATE])
+        self.assertEqual([t["pid"] for t in moved["tenders"]], ["9320336"])
+        self.assertFalse(moved["complete"])
+
+    def test_a_whole_day_keeps_saying_it_is_whole(self):
+        home(self.root, "9320336", [("TS.docx", "specifikacija", "aa")])
+        day(self.root, ["9320336"])
+        self.deliver()
+
+        served = json.loads(self.drive.uploaded["work/LT/%s/day.json" % DATE])
+        self.assertTrue(served["complete"])
+        self.assertNotIn("undelivered", served.get("coverage", {}))
 
     def test_only_what_the_day_names_is_delivered(self):
         home(self.root, "9320336", [("TS.docx", "specifikacija", "aa")])

@@ -136,6 +136,7 @@ def deliver(out_root, date, run_id, drive, base, tok):
     pids = [str(t["pid"]) for t in day.get("tenders", [])]
 
     records = {}
+    undelivered = []
     files = sent = carried = 0
     bytes_sent = 0
     tally = {"new": 0, "changed": 0, "unchanged": 0}
@@ -145,8 +146,13 @@ def deliver(out_root, date, run_id, drive, base, tok):
         state_path = os.path.join(home, "state.json")
         if not os.path.exists(state_path):
             # A procurement the day names and the disk does not hold is a delivery that did
-            # not finish. Named, never skipped in silence.
+            # not finish. It is taken OUT of the day rather than merely mentioned: left in,
+            # `day.json` would name a home that is not on the drive, carry `lt_day`'s local
+            # guess of `new` for it, and still call itself complete — so a reader would ask
+            # the drive for an archive that was never uploaded and get a 404 in the middle
+            # of a night that reported success. A day may be short; it may not be wrong.
             print("  no state for %s — not delivered" % pid, file=sys.stderr)
+            undelivered.append(pid)
             continue
         with open(state_path, encoding="utf-8") as fh:
             current = json.load(fh)
@@ -219,6 +225,21 @@ def deliver(out_root, date, run_id, drive, base, tok):
         record = records.get(str(row["pid"]))
         if record is not None:
             row["status"] = record["status"]
+    # A procurement that never reached the drive is not in the day the drive publishes.
+    if undelivered:
+        gone = set(undelivered)
+        for doc in (day, day_changes):
+            doc["tenders"] = [r for r in doc.get("tenders", [])
+                              if str(r.get("pid")) not in gone]
+        day["lost"] = list(day.get("lost") or []) + [
+            {"pid": pid, "kind": None,
+             "reason": "delivery did not finish — no state on the runner"}
+            for pid in undelivered]
+        day["complete"] = False
+        day_changes["complete"] = False
+        day["coverage"] = dict(day.get("coverage") or {},
+                               delivered=len(records), undelivered=len(undelivered))
+
     day_changes["counts"] = dict(day_changes.get("counts") or {}, **tally)
     day_changes["compared_against"] = "drive"
 

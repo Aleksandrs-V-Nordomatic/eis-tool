@@ -58,6 +58,28 @@ jobs:
       - name: Test
         run: python3 -m unittest discover -s tests -t tests
 
+      # THE DAY IS DECIDED ONCE, HERE, AND EVERY LATER STEP READS IT. It used to be computed
+      # independently in the fetch step and again in the delivery step, so a run that crossed
+      # UTC midnight between them fetched one folder and delivered another — and the second
+      # one does not exist.
+      #
+      # The default is YESTERDAY IN VILNIUS, not the runner's UTC today. The window search is
+      # by publication date, and this job's own schedule fires at 00:40 UTC, which is 03:40 in
+      # Vilnius: `date -u +%F` there names a day less than four hours old, so a blank input
+      # would ask the portal for a morning that has barely started and deliver a near-empty
+      # day that calls itself complete.
+      - name: Which day this is
+        env:
+          RUN_DATE: ${{ inputs.date }}
+        run: |
+          # Computed in UTC on purpose rather than in Europe/Vilnius: the image installs no
+          # tzdata, so a named zone would be silently ignored and answer UTC anyway. It is
+          # the same answer at this job's hour — Vilnius runs three hours ahead, so its date
+          # and UTC's agree for every moment before 21:00 UTC, and this fires at 00:40.
+          DAY="${RUN_DATE:-$(date -u -d 'yesterday' +%F)}"
+          echo "DAY=$DAY" >> "$GITHUB_ENV"
+          echo "the day is $DAY"
+
       # THE GATE IS CHECKED BEFORE THE PORTAL IS TOUCHED, AND THIS STEP IS WHY IT IS A STEP.
       # `batch.load_policy` fails open on purpose — an unreadable policy returns None rather
       # than dropping every procurement, which is the right call inside a library. For an
@@ -94,11 +116,9 @@ jobs:
         env:
           EIS_POLICY: policy.json
           EIS_COUNTRY: LT
-          RUN_DATE: ${{ inputs.date }}
           LIMIT: ${{ inputs.limit }}
           TARGETS: ${{ inputs.targets }}
         run: |
-          DAY="${RUN_DATE:-$(date -u +%F)}"
           # The window and the watch list go in ONE pass, deduplicated by the tool. Asking
           # twice would be two draws at one portal for one date and two answers about what
           # that date held.
@@ -142,6 +162,5 @@ jobs:
           GRAPH_DRIVE_ID: ${{ secrets.GRAPH_DRIVE_ID }}
           GRAPH_DEST_ROOT: ${{ secrets.GRAPH_DEST_ROOT }}
           EIS_COUNTRY: LT
-          RUN_DATE: ${{ inputs.date }}
         run: |
-          python3 deliver_lt.py --out work --date "${RUN_DATE:-$(date -u +%F)}"
+          python3 deliver_lt.py --out work --date "$DAY"
