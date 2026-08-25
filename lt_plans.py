@@ -19,7 +19,7 @@ financial year, then a row per planned procurement. Measured over ten buyers: 3,
 one schema, and `BVPŽ kodas` filled on 91% of them — so the same CPV gate that runs on
 notices runs here.
 
-    python3 lt_plans.py --out work/LT --policy lt_policy.example.json
+    python3 lt_plans.py --out work/LT --policy rules.json
 """
 import argparse
 import json

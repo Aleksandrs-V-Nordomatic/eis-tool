@@ -155,6 +155,14 @@ a library that is right; for an unattended night it would mean fetching every ar
 window holds from a state portal because a secret was misspelt. `lt-day.yml` therefore
 checks that the policy parses before the portal is touched, and stops if it does not.
 
+**And the policy comes from the secret or the run does not happen.** Both `*_policy.example.json`
+files in this repository are deliberately unrelated illustrations — office printing — so that a
+public repository discloses nothing about what any deployment actually hunts for. They exist to
+be copied into `EIS_POLICY` and `LT_POLICY` and to document the shape, never to be run against.
+A scheduled night with no secret therefore stops rather than falling back: run against the
+example it would fetch almost nothing, deliver a valid day and report success, and an empty
+morning reads exactly like a quiet one.
+
 ## What gets published
 
 A tender has one home. A day is a list of what moved. This shape is the tool's own and is

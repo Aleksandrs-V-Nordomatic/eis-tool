@@ -68,13 +68,18 @@ jobs:
         env:
           LT_POLICY: ${{ secrets.LT_POLICY }}
         run: |
-          if [ -n "$LT_POLICY" ]; then
-            printf '%s' "$LT_POLICY" > policy.json
-            echo "policy: from the repository secret"
-          else
-            cp lt_policy.example.json policy.json
-            echo "::warning::no LT_POLICY secret — running on the committed example policy, which over-recalls"
+          # THE SECRET IS REQUIRED, AND FALLING BACK TO THE COMMITTED FILE WOULD BE WORSE
+          # THAN STOPPING. `lt_policy.example.json` is an unrelated illustration — office
+          # printing — chosen so the repository discloses nothing about what anybody
+          # actually hunts for. A night run against it would fetch almost nothing, deliver a
+          # valid day, and report success, which is the one failure shape nobody catches:
+          # an empty morning reads exactly like a quiet one.
+          if [ -z "$LT_POLICY" ]; then
+            echo "::error::no LT_POLICY secret. The committed example is an unrelated illustration and would produce an almost empty night that looks like a successful one."
+            exit 1
           fi
+          printf '%s' "$LT_POLICY" > policy.json
+          echo "policy: from the repository secret"
           python3 -c "
           import sys, batch
           rules = batch.load_policy('policy.json')

@@ -21,7 +21,7 @@ must not take a missing code for a code that failed to match. The documents are 
 `listContractDocuments` and the archive answer for a door id exactly as for a tender, and
 that is where the qualification requirements actually are.
 
-    python3 lt_doors.py --out work/LT --policy lt_policy.example.json
+    python3 lt_doors.py --out work/LT --policy rules.json
 """
 import argparse
 import json
