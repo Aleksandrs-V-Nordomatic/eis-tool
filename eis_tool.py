@@ -185,6 +185,30 @@ def read_scans(pack, model=None, limit=None, provider=None):
     return 0
 
 
+def read_targets(source):
+    """Ids from a file or from the argument itself, in the order they were given.
+
+    Both spellings because both callers are real: a workflow writes its multi-line input to
+    a file, and a person on a terminal types two ids separated by a comma. Deduplicated
+    while keeping order, because a list naming the same procurement twice would fetch it
+    twice and count the day wrong.
+    """
+    if not source:
+        return []
+    raw = source
+    if os.path.exists(source):
+        with open(source, encoding="utf-8") as fh:
+            raw = fh.read()
+    out, seen = [], set()
+    for token in re.split(r"[\s,]+", raw.strip()):
+        # `EPPS:9320336` is how the board spells a key; the id is what the portal answers to.
+        token = token.split(":")[-1].strip()
+        if token and token not in seen:
+            seen.add(token)
+            out.append(token)
+    return out
+
+
 def main(argv=None):
     utf8_streams()
 
@@ -228,6 +252,13 @@ def main(argv=None):
     p.add_argument("--policy", default=None,
                    help="recall policy: JSON, a path to one, or EIS_POLICY from the "
                         "environment. Absent means fetch everything.")
+    # THE WATCH LIST TRAVELS WITH THE WINDOW, never in a run of its own. Two runs are two
+    # draws at one portal for one date, and two answers about what that date contained.
+    # These are ids somebody is still deciding about, so the recall gate does not apply:
+    # it decides what is worth fetching for the FIRST time, and these already have a card.
+    p.add_argument("--targets", default=None,
+                   help="ids to re-read whatever the gate would say — a file of them, one "
+                        "per line, or the ids themselves separated by commas or spaces")
     country.add_argument(p)
 
     # The two standing populations. Neither is a day and neither is a tender: a plan says
@@ -289,7 +320,8 @@ def main(argv=None):
         out = os.path.join(args.out, code)
         if code == "LT":
             import lt_day
-            day, _ = lt_day.run(args.date, out, args.limit, policy=args.policy)
+            day, _ = lt_day.run(args.date, out, args.limit, policy=args.policy,
+                                watch=read_targets(args.targets))
         else:
             print("day: %s has no day runner yet — use batch.py for Latvia" % code,
                   file=sys.stderr)

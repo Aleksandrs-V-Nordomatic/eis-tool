@@ -55,8 +55,36 @@ def _write(path, payload):
         json.dump(payload, fh, ensure_ascii=False, indent=2)
 
 
-def run(date, out_root, limit=None, keep=None, run_id=None, policy=None):
-    """Fetch the window's procurements into homes and write the day's two files."""
+def resolve(pid):
+    """Which of the three views answers for an id nobody told us the kind of.
+
+    A card on the board carries `EPPS:<id>` and nothing else, because that is all the key
+    needs to be. The kind — competition, market consultation, door — decides which view
+    serves it, so it is asked of the portal rather than stored: a kind kept on the card
+    would be one more thing that can be wrong, and the three requests cost one page each.
+    """
+    for kind in ("tender", "consultation", "door"):
+        try:
+            notice = lt_page.notice_only(pid, kind)
+        except Exception:
+            notice = None
+        if notice is not None:
+            return kind, notice
+    return None, None
+
+
+def run(date, out_root, limit=None, keep=None, run_id=None, policy=None, watch=None):
+    """Fetch the window's procurements into homes and write the day's two files.
+
+    `watch` is the ids somebody is still deciding about — the cards whose `Lēmums` has not
+    been settled. They ride in the SAME pass as the window, deduplicated against it, for
+    the reason the Latvian dispatch carries its watch list too: two passes are two draws at
+    one portal for one date, and two answers about what a day contained.
+
+    THE GATE DOES NOT APPLY TO THEM. The gate decides what is worth fetching for the first
+    time; a watched procurement was already judged worth a card by a person, and dropping
+    it here would silently stop answering the question the card is open for.
+    """
     run_id = run_id or time.strftime("%Y%m%dT%H%M%S+0300", time.localtime())
     stamp = date.replace("-", "/") if "-" not in date else date
     y, m, d = (date.split("-") if "-" in date else reversed(date.split("/")))
@@ -75,13 +103,36 @@ def run(date, out_root, limit=None, keep=None, run_id=None, policy=None):
     rules = batch_mod.load_policy(policy) if batch_mod is not None else None
 
     moves, delivered, failed, gated = [], [], [], []
+
+    # The watch list, added to the window and deduplicated against it. `limit` has already
+    # been applied above and deliberately does not reach here: a trial run asks for fewer
+    # of the day's procurements, never for fewer of the ones somebody is waiting on.
+    known = {str(t["pid"]) for t in targets}
+    for pid in (watch or []):
+        pid = str(pid)
+        if pid in known:
+            continue
+        kind, notice = resolve(pid)
+        if kind is None:
+            # A watched card whose resource no view will serve is a hole in the watch, and
+            # the report has to be able to name it.
+            failed.append({"pid": pid, "kind": None, "watched": True,
+                           "reason": "no view served it — withdrawn, or EPPS answered "
+                                     "with a login form"})
+            continue
+        targets.append({"pid": pid, "kind": kind, "watched": True, "notice": notice,
+                        "title": notice.get("title"), "buyer": notice.get("buyer"),
+                        "published": notice.get("published")})
+        known.add(pid)
+
     for target in targets:
         pid = target["pid"]
         home = os.path.join(out_root, "tenders", pid)
         previous = _read(os.path.join(home, "state.json"))
 
-        notice = None
-        if rules is not None:
+        # Already in hand for a watched procurement, whose view had to be found by asking.
+        notice = target.get("notice")
+        if rules is not None and not target.get("watched"):
             try:
                 notice = lt_page.notice_only(pid, target["kind"])
             except Exception as exc:
@@ -115,6 +166,10 @@ def run(date, out_root, limit=None, keep=None, run_id=None, policy=None):
                              if x.get("amendment")}, key=str)
         moves.append({
             "pid": pid, "kind": target["kind"], "status": status,
+            # Which population this came from. A reader answers two different questions of
+            # the two — "is this worth a card" and "has what I am waiting on moved" — and a
+            # day that did not say which was which would make it guess from the date.
+            "watched": bool(target.get("watched")),
             "title": target["title"], "buyer": target["buyer"],
             "published": target["published"], "deadline": done.get("deadline"),
             "cpv_main": done.get("cpv_main"),
@@ -125,6 +180,7 @@ def run(date, out_root, limit=None, keep=None, run_id=None, policy=None):
         })
         delivered.append({
             "pid": pid, "kind": target["kind"], "status": status,
+            "watched": bool(target.get("watched")),
             "home": "tenders/%s" % pid,
             "documents": done["documents"], "bytes": done["bytes"],
             "title": target["title"],
@@ -133,12 +189,14 @@ def run(date, out_root, limit=None, keep=None, run_id=None, policy=None):
     by_status = {}
     for row in moves:
         by_status[row["status"]] = by_status.get(row["status"], 0) + 1
+    watched_count = sum(1 for row in moves if row["watched"])
 
     changes = {
         "schema": "day-changes/1", "date": date, "country": "LT", "run_id": run_id,
         "written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "complete": not failed,
-        "counts": dict(by_status, tenders=len(moves), gated=len(gated)),
+        "counts": dict(by_status, tenders=len(moves), gated=len(gated),
+                           watched=watched_count),
         "gated": gated,
         "tenders": moves,
     }
@@ -156,6 +214,7 @@ def run(date, out_root, limit=None, keep=None, run_id=None, policy=None):
         "coverage": {"targets": len(targets), "delivered": len(delivered),
                      "gated": len(gated), "failed": len(failed)},
         "counts": dict(by_status, tenders=len(delivered), gated=len(gated),
+                       watched=watched_count,
                        documents=sum(t["documents"] for t in delivered),
                        bytes=sum(t["bytes"] for t in delivered)),
         "lost": failed,

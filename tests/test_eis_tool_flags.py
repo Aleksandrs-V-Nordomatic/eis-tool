@@ -24,8 +24,9 @@ class Recorder(object):
     def __init__(self):
         self.calls = []
 
-    def run(self, date, out, limit=None, keep=None, run_id=None, policy=None):
-        self.calls.append({"date": date, "out": out, "limit": limit, "policy": policy})
+    def run(self, date, out, limit=None, keep=None, run_id=None, policy=None, watch=None):
+        self.calls.append({"date": date, "out": out, "limit": limit, "policy": policy,
+                           "watch": watch})
         return ({"date": date, "complete": True,
                  "coverage": {"delivered": 0, "targets": 0, "gated": 0, "failed": 0},
                  "counts": {"documents": 0}}, {})
@@ -51,6 +52,12 @@ class DayPassesWhatItWasGiven(unittest.TestCase):
 
     def test_the_limit_reaches_the_run(self):
         self.assertEqual(self.call("--limit", "7")["limit"], 7)
+
+    def test_the_watch_list_reaches_the_run_as_bare_ids(self):
+        self.assertEqual(self.call("--targets", "EPPS:11, 22")["watch"], ["11", "22"])
+
+    def test_no_watch_list_is_an_empty_one(self):
+        self.assertEqual(self.call()["watch"], [])
 
     def test_the_country_lands_in_the_output_path(self):
         """The destination carries the country for the same reason the source does."""
