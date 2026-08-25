@@ -613,5 +613,8 @@ class OverriddenCodes(unittest.TestCase):
 
     def test_a_policy_written_before_overrides_existed_still_loads(self):
         rules = self.policy()
-        self.assertEqual(len(rules), 4)
-        self.assertEqual(rules[3], ())
+        # The tuple grows as optional fields are added; what this protects is that a policy
+        # written before any of them loads, and that every one it omits defaults to empty.
+        self.assertEqual(len(rules), 5)
+        self.assertEqual(rules[3], ())      # override_prefixes
+        self.assertEqual(rules[4], ())      # recall_cpv_prefixes

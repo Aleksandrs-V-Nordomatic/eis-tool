@@ -130,7 +130,16 @@ def load_policy(source=None):
             # one — and 62% of live procurements carry one code only. Without an override
             # such a notice is dropped before a byte moves, which is the one failure the
             # exclusions are least allowed to cause.
-            tuple(policy.get("override_prefixes") or ()))
+            tuple(policy.get("override_prefixes") or ()),
+            # CODES THAT RECALL ON THEIR OWN, because a title is not always the better
+            # signal. Recall was title-only, and a code could exclude or rescue from an
+            # exclusion but never bring anything in — so a procurement whose title is vague
+            # and whose code is exact was dropped before a byte moved. Measured on the
+            # Lithuanian day of 24 Aug 2026: `Stebejimo sistema` under 32323500, which is
+            # literally "video-surveillance system", and `LoRaWAN ... objektu parametru
+            # kontrolei` under 32440000, telemetry. Both ours, both invisible, because a
+            # buyer wrote a short title. Absent, this changes nothing.
+            tuple(policy.get("recall_cpv_prefixes") or ()))
 
 def cpv_codes(notice):
     """Every CPV code a notice carries, however the source spelled them."""
@@ -152,6 +161,7 @@ def outside_scope(notice, policy):
     # Older policies carry three fields; the override list is the fourth and optional.
     recall_terms, exclude_prefixes, exclude_title_terms = policy[:3]
     override_prefixes = policy[3] if len(policy) > 3 else ()
+    recall_prefixes = policy[4] if len(policy) > 4 else ()
 
     title = str(notice.get("title") or notice.get("name") or "").casefold()
     if title and any(term in title for term in exclude_title_terms):
@@ -165,6 +175,12 @@ def outside_scope(notice, policy):
     if (codes and exclude_prefixes and not overridden
             and all(c.startswith(exclude_prefixes) for c in codes)):
         return True
+
+    # A CODE CAN RECALL, AND IT IS ASKED BEFORE THE TITLE. The exclusions above still
+    # bind — an excluded title term or an all-excluded code set has already returned — so
+    # this widens what is fetched and can never drop anything the old gate kept.
+    if recall_prefixes and any(c.startswith(recall_prefixes) for c in codes):
+        return False
 
     if not title:
         return False                      # missing signal fails open

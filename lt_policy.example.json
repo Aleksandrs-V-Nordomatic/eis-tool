@@ -19,5 +19,9 @@
   "_overrides": "Codes read anyway, wherever their division sits: a contract can carry a main code inside an excluded division and nothing else, and 62% of live procurements carry one code only.",
   "override_prefixes": [
     "30199"
+  ],
+  "_recall_codes": "Codes that recall on their own, for the procurement whose title is vague and whose code is exact. Recall is otherwise title-only, so a buyer who writes three words hides the whole thing. Exclusions still bind: this widens what is fetched and can never drop anything.",
+  "recall_cpv_prefixes": [
+    "79810"
   ]
 }

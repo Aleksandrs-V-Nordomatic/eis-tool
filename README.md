@@ -155,6 +155,16 @@ a library that is right; for an unattended night it would mean fetching every ar
 window holds from a state portal because a secret was misspelt. `lt-day.yml` therefore
 checks that the policy parses before the portal is touched, and stops if it does not.
 
+**The gate has two ways in, and a code is one of them.** Recall used to be title-only: a CPV
+code could exclude a notice or rescue one from an exclusion, but it could never bring anything
+in, so the gate's whole sensitivity rested on a buyer choosing words we had guessed in advance.
+That holds up after a title list has been tuned against a live register for weeks and fails on a
+country whose roots were written in one sitting. Measured on the Lithuanian day of 24 August
+2026: `Stebejimo sistema` under 32323500, which is literally "video-surveillance system", and a
+LoRaWAN parameter-monitoring rollout under 32440000, telemetry — both squarely in scope, both
+dropped before a byte moved. `recall_cpv_prefixes` closes that. Exclusions still bind, so the
+clause can only widen what is fetched; absent, nothing changes.
+
 **An empty window is reported as broken, not as quiet.** Lithuania publishes on the order of a
 hundred resources a working day and thirteen on a Sunday; zero is not something EPPS does. What
 produces zero is the crawl breaking — the results table gaining a column, the displaytag page
