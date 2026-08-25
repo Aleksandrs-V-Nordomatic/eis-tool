@@ -99,10 +99,25 @@ jobs:
           # that date held.
           printf '%s' "$TARGETS" > targets.txt
           echo "fetching the Lithuanian window for $DAY, plus $(grep -c . targets.txt || true) watched id(s)"
+          rc=0
           python3 eis_tool.py day "$DAY" --out work \
             ${LIMIT:+--limit $LIMIT} \
             $([ -s targets.txt ] && echo "--targets targets.txt") \
-            --policy policy.json
+            --policy policy.json || rc=$?
+
+          # A SHORT DAY IS STILL A DAY, AND IT STILL GETS DELIVERED. `day` exits 1 when any
+          # target did not arrive — one withdrawn procurement, one card EPPS served its
+          # login form for — and under `sh -e` that would skip the delivery below and throw
+          # away every procurement that DID arrive. This is the same rule Latvia's `collect`
+          # job states as `if: always()`: a target that failed is the ordinary case the
+          # day's own file exists to describe, and `day.json` records it in `lost` and marks
+          # itself incomplete. Only a real error — a bad country, an unparseable argument,
+          # an interpreter that died — stops the run.
+          if [ "$rc" -eq 1 ]; then
+            echo "::warning::the day is short — day.json names what did not arrive, and it is delivered anyway"
+          elif [ "$rc" -ne 0 ]; then
+            exit "$rc"
+          fi
 
       # The day is on the runner's disk and the runner is about to disappear. Everything
       # after this line is what makes it a day somebody can read tomorrow — and, because the

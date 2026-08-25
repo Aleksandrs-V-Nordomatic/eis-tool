@@ -329,6 +329,13 @@ def main(argv=None):
         print("%s %s: %d/%d delivered, %d document(s) -> %s"
               % (code, day["date"], day["coverage"]["delivered"],
                  day["coverage"]["targets"], day["counts"]["documents"], out))
+        # NAMED, NOT COUNTED. "5 of 41" is also what a heavily gated day looks like, so a
+        # short day that only reported a number would be indistinguishable from a normal
+        # one. The exit code says the day is short; these lines say which procurements and
+        # why, which is the part a person can act on.
+        for row in day.get("lost", []):
+            print("  lost %s (%s): %s" % (row.get("pid"), row.get("kind") or "?",
+                                          row.get("reason")), file=sys.stderr)
         return 0 if day["complete"] else 1
 
     if args.command == "probe":
