@@ -216,6 +216,20 @@ class AnEmptyWindowIsBrokenDiscovery(unittest.TestCase):
         self.assertFalse(day["discovery_failed"])
         self.assertTrue(day["complete"])
 
+    def test_an_empty_weekend_is_not_flagged(self):
+        """The country does not publish at the weekend, and a flag that fires then is noise.
+
+        Measured against the live portal on 30 Aug 2026: Friday 28 August returned 106 rows,
+        Saturday 29 August returned 0. A guard that called that a broken crawl would raise a
+        false alarm twice a week, which is how a real alarm stops being read.
+        """
+        stubs = Stubs(window=[], served={})
+        stubs.install(self)
+        for weekend_day in ("2026-08-29", "2026-08-30"):     # Saturday, Sunday
+            day, changes = lt_day.run(weekend_day, self.out, policy="{}")
+            self.assertFalse(day["discovery_failed"], weekend_day)
+            self.assertTrue(day["complete"], weekend_day)
+
     def test_a_watch_list_does_not_disguise_an_empty_window(self):
         """The watch list is not discovery, and it must not stand in for it."""
         day, changes = self.go(Stubs(window=[], served={"999": ("tender",)}), watch=["999"])

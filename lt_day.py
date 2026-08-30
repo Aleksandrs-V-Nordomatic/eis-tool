@@ -22,6 +22,7 @@ that says a file changed.
     python3 lt_day.py 2026-08-20 --out work/LT --limit 5
 """
 import argparse
+import datetime
 import json
 import os
 import time
@@ -91,14 +92,19 @@ def run(date, out_root, limit=None, keep=None, run_id=None, policy=None, watch=N
     window = "%s/%s/%s" % (d, m, y)
 
     targets = lt_targets.day(window, window)
-    # AN EMPTY WINDOW IS NOT A QUIET DAY, AND NOTHING ELSE WILL EVER SAY SO. Lithuania
-    # publishes on the order of a hundred resources a working day and thirteen on a Sunday;
-    # zero has never been observed and is not a thing EPPS does. What produces zero is our
-    # own discovery breaking — the results table gaining a column, or the displaytag page
-    # parameter changing when the portal is redeployed — and every one of those failures
-    # returns an empty list rather than an error. Left unremarked it becomes a green run, a
-    # complete day, an empty morning, and nothing anywhere to distinguish it from a holiday.
-    discovery_failed = not targets
+    # AN EMPTY WINDOW ON A WORKING DAY IS A BROKEN CRAWL, AND NOTHING ELSE WOULD SAY SO.
+    # Lithuania publishes on the order of a hundred resources a working day. What produces
+    # zero is our own discovery breaking — the results table gaining a column, or the
+    # displaytag page parameter changing when the portal is redeployed — and every one of
+    # those failures returns an empty list rather than an error. Left unremarked it becomes
+    # a green run, a complete day, an empty morning, and nothing to tell it from a holiday.
+    #
+    # BUT ONLY ON A WORKING DAY. Measured 30 Aug 2026 against the live portal: Friday
+    # 28 August returned 106 rows and Saturday 29 August returned 0. The country does not
+    # publish at the weekend, so a flag that fired on an empty Saturday would cry wolf twice
+    # every week until nobody read it — which is the failure this flag exists to prevent.
+    published_today = datetime.date(*(int(p) for p in date.split("-"))).weekday() < 5
+    discovery_failed = published_today and not targets
     if keep:
         targets = [t for t in targets if t["kind"] in keep]
     if limit:
