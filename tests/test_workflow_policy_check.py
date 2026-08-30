@@ -32,16 +32,32 @@ FULL = {
 
 
 def inline_check():
-    """The `python3 -c "..."` body out of the recall-policy step, verbatim."""
-    import yaml
+    """The `python3 -c "..."` body out of the recall-policy step, verbatim.
+
+    Read as text rather than through a YAML parser: the runner image carries no PyYAML, and
+    a test that needs a dependency the thing under test does not have is a test that only
+    runs on somebody's laptop.
+    """
     with open(WORKFLOW, encoding="utf-8") as fh:
-        doc = yaml.safe_load(fh)
-    steps = doc["jobs"]["day"]["steps"]
-    step = [s for s in steps if "recall policy" in (s.get("name") or "")]
-    assert len(step) == 1, "expected exactly one recall-policy step, found %d" % len(step)
-    run = step[0]["run"]
-    assert 'python3 -c "' in run, "the recall-policy step no longer runs an inline script"
-    return run.split('python3 -c "', 1)[1].rsplit('"', 1)[0]
+        lines = fh.read().splitlines()
+
+    starts = [i for i, ln in enumerate(lines) if ln.rstrip().endswith('python3 -c "')]
+    assert len(starts) == 1, (
+        "expected exactly one inline python block in the workflow, found %d" % len(starts))
+
+    body, indent = [], None
+    for ln in lines[starts[0] + 1:]:
+        if ln.strip() == '"':
+            break
+        if indent is None and ln.strip():
+            indent = len(ln) - len(ln.lstrip())
+        body.append(ln[indent:] if indent and ln.startswith(" " * indent) else ln.lstrip())
+    else:
+        raise AssertionError("the inline python block is never closed")
+
+    script = "\n".join(body)
+    assert "load_policy" in script, "the block found is not the recall-policy check"
+    return script
 
 
 def run_check(policy):
