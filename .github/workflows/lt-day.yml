@@ -107,9 +107,16 @@ jobs:
           rules = batch.load_policy('policy.json')
           if rules is None:
               sys.exit('the recall policy did not parse — refusing to fetch the whole day ungated')
-          recall, excl_cpv, excl_title, override = rules
-          print('policy: %d recall term(s), %d excluded division(s), %d excluded title term(s), %d override(s)'
-                % (len(recall), len(excl_cpv), len(excl_title), len(override)))
+          # READ BY POSITION, NEVER UNPACKED. This line used to be a four-way unpack, and on
+          # 28 Aug 2026 load_policy grew a fifth field — the recall codes. Two nights died
+          # here with ValueError before anybody looked, because the step that exists to
+          # protect the night was itself brittle to the thing it was checking. A sixth field
+          # now prints as a number instead of stopping the run.
+          names = ('recall term', 'excluded division', 'excluded title term',
+                   'override', 'recall code')
+          print('policy: ' + ', '.join(
+              '%d %s(s)' % (len(v), names[i] if i < len(names) else 'field %d' % (i + 1))
+              for i, v in enumerate(rules)))
           "
 
       - name: Fetch the day
