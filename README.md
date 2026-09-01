@@ -23,9 +23,23 @@ IUB notice  ─resolve─→  EIS page  ─fetch─→  documents  ─extract─
 The register's API never returns the platform link, so the first hop is real work.
 
 Discovery walks the register and resolves each notice to its EIS page. A procurement that
-carries no register notice is therefore not discovered — it can still be fetched by id, and
-that is the supported route for one. Widening discovery beyond the register is deliberately
-out of scope; `eis_page.walk_ids` is the unused mechanism for it, kept and not wired in.
+carries no register notice is therefore not discovered by that route — a fifth of what the
+platform publishes, measured: unregulated procurements, market consultations, and closed
+competitions inside a dynamic purchasing system.
+
+**`idwalk.py` is the second source, and it asks the platform instead.** It walks procurement
+ids: a budgeted handful a night, above the newest known id and back into the space below it,
+and the ones that turn out to be published join the same run's target list. It is not a
+sweep and will not become one — the id space is thousands wide and the portal is a public
+service.
+
+Which ids get asked about is `idspace.py`, and the answers are remembered at
+`<country>/idspace.json` beside the delivery, because a runner is new every night. Every
+shard reads that file and asks about its own slice; `collect_day.py` merges the slices and
+is the only writer. A frontier alone would not do: an id is assigned when the record is
+created and publishes whenever the buyer is ready, so the space below the newest id keeps
+filling in. Measured over 72 published procurements, the gap between a notice's own id and the highest
+id published by that date was 77 at the median, 1 760 at the ninth decile, and 9 972 once.
 
 ## Use
 
@@ -100,7 +114,7 @@ guessed for a code this repository has no source for — and it picks the folder
 which is the country's own under the runtime root:
 
 ```
-work/LV/  <date>/{day.json,changes.json}   tenders/<pid>/…
+work/LV/  idspace.json  <date>/{day.json,changes.json}   tenders/<pid>/…
 ```
 
 **`GRAPH_DEST_ROOT` names the folder that CONTAINS the country folders, not one of them.**
@@ -275,6 +289,14 @@ illustration — so this repository names no industry, no trade and no target. U
 is filtered and every discovered notice is fetched. The gate is in its own file because it is
 the one piece of judgement that is not about a country: every country tool runs this exact
 rule, and it is written where it belongs rather than reached for out of a shard driver.
+
+A policy may be **exclusions only**. Recall terms are a whitelist, and a whitelist suits a
+caller who buys a nameable thing: the word is in the title or the notice is not theirs. It is
+exactly wrong for a caller whose scope hides inside somebody else's purchase, where the title
+names the building and the scope appears three documents down — there the honest gate is the
+buyer's own classification, and a whitelist drops most of a day. So `recall_title_terms` is
+one optional half of a policy rather than the price of having one; a policy carrying no rule
+at all still means no filter.
 
 ## Four properties worth knowing before changing anything
 
