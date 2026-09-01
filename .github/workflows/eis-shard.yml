@@ -1,0 +1,206 @@
+name: eis-shard
+
+# One draw for one shard. Called by eis-shard-chain.yml.
+#
+# The caller sequences draws for this shard. That guarantees a successful artifact is
+# visible before the next draw checks it, while unrelated shards remain fully independent.
+on:
+  workflow_call:
+    inputs:
+      shard: {required: true, type: number}
+      shards: {required: true, type: number}
+      draw: {required: true, type: number}
+      days: {required: false, type: string, default: "1"}
+      date_from: {required: false, type: string, default: ""}
+      date_to: {required: false, type: string, default: ""}
+      targets: {required: false, type: string, default: ""}
+      llm_max_files: {required: false, type: string, default: "40"}
+      pause: {required: false, type: string, default: "5"}
+      skip_archive: {required: false, type: boolean, default: false}
+      # The caller names the day. A runner's own UTC date is a different day from the
+      # caller's for three hours every night, and the delivery is filed by date.
+      date: {required: false, type: string, default: ""}
+      # WHICH COUNTRY THIS DELIVERY IS FOR. It picks the folder published to, and the
+      # tool refuses to guess: a run that fetched one country and wrote under another
+      # uploads cleanly and says nothing, which is the failure the flag exists to stop.
+      # This repository fetches LV only; anything else is refused by the gate below,
+      # before a byte moves, rather than by the delivery hours later.
+      country: {required: false, type: string, default: "LV"}
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  shard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    # The toolchain arrives as a layer instead of being assembled by apt on every job.
+    # Speed is the smaller half of why: LibreOffice and Tesseract are now the SAME versions
+    # on every run, which is what "same bytes in, same text out" needed and did not have —
+    # apt fetched whatever Ubuntu shipped that day, and LibreOffice is what reads the Word 97
+    # attachments. `latest` only ever points at an image that passed this repository's own
+    # tests inside itself (image.yml).
+    # The registry path is a repository variable, not a literal: GHCR namespaces carry the
+    # owner's account name, and hard-coding one pins this workflow to whoever happened to
+    # own the repository when it was written. `image.yml` prints the value to set after a
+    # build. Unset, this job fails immediately and says so — which is the right failure,
+    # because the alternative is running against somebody else's image.
+    container:
+      image: ${{ vars.TOOLCHAIN_IMAGE }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # ASK THE ADDRESS BEFORE BUILDING THE MACHINE. A refused draw costs seconds this way;
+      # when the install came first it cost a minute of LibreOffice nobody used.
+      - name: Shard ${{ inputs.shard }}, draw ${{ inputs.draw }} — is there work, and can this runner reach EIS
+        id: go
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EIS_COUNTRY: ${{ inputs.country }}
+        run: |
+          # Reliable only because the caller chains the draws: by the time draw 2 runs,
+          # draw 1 has finished and its artifact, if any, exists.
+          # The matrix is fixed at four shards; `shards` is an input. Asking for two still
+          # starts four jobs, and the two extra ones have no work — say so before spending a
+          # minute installing LibreOffice for them.
+          if [ "${{ inputs.shard }}" -gt "${{ inputs.shards }}" ]; then
+            echo "shard ${{ inputs.shard }} is outside the ${{ inputs.shards }} asked for — nothing to do"
+            echo "go=no" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          # THE COUNTRY, BEFORE ANYTHING IS FETCHED. This repository reads Latvia and
+          # nothing else, and the delivery step at the bottom already refuses any other
+          # code — but it refuses at the END, after a whole day has been downloaded from a
+          # state portal. Asked here it costs a second.
+          if ! python3 -c "
+          import country, os, sys
+          try:
+              country.resolve(os.environ.get('EIS_COUNTRY') or None)
+          except country.Mismatch as exc:
+              sys.exit('%s — this repository fetches Latvia only' % exc)
+          "; then
+            exit 1
+          fi
+
+          # curl and python3 rather than `gh`, which the image does not carry. The check is
+          # two lines either way and the image stays smaller for it.
+          MINE="eis-batch-shard-${{ inputs.shard }}"
+          done_flag=$(curl -s -H "Authorization: Bearer ${{ github.token }}" \
+                      "${{ github.api_url }}/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts" \
+                      | python3 -c "import sys, json; print(str(any(a['name'] == '$MINE' for a in json.load(sys.stdin).get('artifacts', []))).lower())" 2>/dev/null || echo false)
+          if [ "$done_flag" = "true" ]; then
+            echo "shard ${{ inputs.shard }} was already fetched by an earlier draw — standing down"
+            echo "go=no" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if python3 eis_tool.py probe; then
+            echo "go=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "this runner drew an address EIS refuses — standing down for the next draw"
+            echo "go=no" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Seconds, and they buy the run's whole premise: the draw that reaches EIS is scarce,
+      # and spending it on code that cannot parse its own fixtures cannot be retried.
+      - name: Test
+        if: steps.go.outputs.go == 'yes'
+        run: python3 -m unittest discover -s tests -t tests
+
+      - name: Fetch this shard, reading in the gaps
+        if: steps.go.outputs.go == 'yes'
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          EIS_PAUSE: ${{ inputs.pause }}
+          DATE_FROM: ${{ inputs.date_from }}
+          DATE_TO: ${{ inputs.date_to }}
+          # Which notices are worth fetching is the caller's business and never the
+          # repository's. Unset means no filter, and a discovery run then fetches every
+          # notice it finds — the safe direction, and a loud one.
+          EIS_POLICY: ${{ secrets.EIS_POLICY }}
+        run: |
+          mkdir -p packs
+          cat > targets.txt <<'TARGETS'
+          ${{ inputs.targets }}
+          TARGETS
+
+          # Clean explicit input before deciding whether the fallback file is needed.
+          sed -i 's/#.*//; s/[[:space:]]*$//; /^$/d' targets.txt
+
+          if [ ! -s targets.txt ] && [ -f requests/next.txt ]; then
+            echo "reading targets from requests/next.txt"
+            cat requests/next.txt >> targets.txt
+            sed -i 's/#.*//; s/[[:space:]]*$//; /^$/d' targets.txt
+          fi
+
+          ARCH=""
+          [ "${{ inputs.skip_archive }}" = "true" ] && ARCH="--skip-archive"
+
+          # A NAMED LIST AND A PUBLICATION WINDOW ARE NOT ALTERNATIVES.
+          #
+          #   dates + targets   both, deduplicated before the list is split across shards
+          #   dates alone       the window
+          #   targets alone     the named list
+          #   neither           the last N days
+          #
+          # A caller watching a few tenders while also taking yesterday asks for both here.
+          # Two runs would be two draws against a portal that refuses a third of runner
+          # addresses, two deliveries into one date, and two `day.json` files where the second
+          # describes less than the first and nothing says so. Naming a date range is how the
+          # window is asked for alongside a list; `days` is the fallback for neither.
+          WINDOW=""
+          if [ -n "$DATE_FROM" ] || [ -n "$DATE_TO" ]; then
+            [ -n "$DATE_FROM" ] && WINDOW="--from $DATE_FROM"
+            [ -n "$DATE_TO" ] && WINDOW="$WINDOW --to $DATE_TO"
+          elif [ ! -s targets.txt ]; then
+            WINDOW="--days ${{ inputs.days }}"
+          fi
+          NAMED=""
+          [ -s targets.txt ] && NAMED="--targets targets.txt"
+
+          echo "fetching ${NAMED:+the named list }${NAMED:+${WINDOW:+and }}${WINDOW:+the window ${DATE_FROM:-last ${{ inputs.days }} day(s)}${DATE_TO:+ to $DATE_TO}}"
+          python3 batch.py --out packs $ARCH $NAMED $WINDOW \
+            --llm-max-files "${{ inputs.llm_max_files }}" \
+            --shard ${{ inputs.shard }} --of ${{ inputs.shards }}
+
+      - name: Upload the text
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ steps.go.outputs.go == 'yes' && success() }}
+        with:
+          name: eis-batch-shard-${{ inputs.shard }}
+          path: |
+            packs/*/manifest.json
+            packs/*/summary.json
+            packs/*/procurement.json
+            packs/*/normalized/**
+            !packs/*/normalized/_unpacked/**
+            packs/*/llm/**
+            packs/done.txt
+            packs/failed.txt
+            packs/withdrawn.txt
+            packs/resolved.tsv
+            packs/accounts.json
+          retention-days: 14
+
+      # DELIVER THE TEXT WHERE THE CONSUMER CAN REACH IT. An artifact's metadata is served by
+      # api.github.com and its bytes are a 302 to `*.blob.core.windows.net` — a different
+      # host, from a rotating pool. A consumer allowed the first and not the second lists the
+      # artifact, sees its size, sees it has not expired, and downloads none of it.
+      #
+      # The step is silent about where it writes: every coordinate is a secret, and
+      # deliver_graph.py prints counts rather than paths. With no secrets configured
+      # HAVE_GRAPH is empty, the step does not run, and the workflow stays usable by anyone
+      # without carrying anybody's addresses.
+      - name: Deliver the text where the reader can reach it
+        if: ${{ steps.go.outputs.go == 'yes' && success() && env.HAVE_GRAPH == 'true' }}
+        env:
+          HAVE_GRAPH: ${{ secrets.GRAPH_DRIVE_ID != '' }}
+          GRAPH_TENANT_ID: ${{ secrets.GRAPH_TENANT_ID }}
+          GRAPH_CLIENT_ID: ${{ secrets.GRAPH_CLIENT_ID }}
+          GRAPH_CLIENT_SECRET: ${{ secrets.GRAPH_CLIENT_SECRET }}
+          GRAPH_DRIVE_ID: ${{ secrets.GRAPH_DRIVE_ID }}
+          GRAPH_DEST_ROOT: ${{ secrets.GRAPH_DEST_ROOT }}
+          RUN_DATE: ${{ inputs.date }}
+          EIS_COUNTRY: ${{ inputs.country }}
+        run: |
+          python3 deliver_graph.py --packs packs \
+            --shard "${{ inputs.shard }}" \
+            --date "${RUN_DATE:-$(date -u +%F)}"

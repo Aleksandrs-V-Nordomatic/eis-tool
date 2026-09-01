@@ -1,0 +1,143 @@
+name: eis-batch
+
+# A day of tenders, split across runners, each one polite.
+
+# Each shard owns its retry chain. If a runner address cannot reach EIS, only that shard
+# advances to a fresh draw; other shards continue downloading in parallel. Successful draws
+# upload a shard artifact, so later draws in the same chain stand down.
+
+# The download job itself lives in eis-shard.yml. eis-shard-chain.yml sequences up to three
+# draws for one shard, and the matrix below runs four such chains independently.
+on:
+  # NO SCHEDULE, DELIBERATELY.
+  #
+  # A schedule was added once on the premise that the consumer could not start a day itself.
+  # That premise was wrong: a consumer with a token can dispatch this workflow directly, and
+  # does.
+  #
+  # What the schedule actually bought was a second, redundant fetch of the same day — the
+  # consumer's run and the scheduled run both pulling and both delivering it. That is the
+  # discourtesy to a state portal the original removal existed to prevent.
+  #
+  # Worth writing down for whoever considers this again: GitHub's cron is a wish, not a
+  # schedule, and can fire hours late. Any design that needs the fetch finished before a
+  # fixed hour cannot be built on it.
+  #
+  # One actor owns the day, and it is the one that reads it.
+
+  # A caller that may not dispatch can still ask, by committing the list. Same shape as
+  # eis_request.txt in eis-fetch.yml, which has worked from the beginning.
+  push:
+    branches: [master]
+    paths: ["requests/next.txt"]
+
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "A window ending TODAY: 1 is today alone, 2 is today and yesterday. Used only when neither dates nor targets are given"
+        required: false
+        default: "1"
+      date_from:
+        description: "Publication start date, YYYY-MM-DD. Alone it means from then until TODAY — for one day give date_to as well. Combines with targets"
+        required: false
+        default: ""
+      date_to:
+        description: "Publication end date, YYYY-MM-DD. Set it equal to date_from to ask for exactly that one day. Combines with targets"
+        required: false
+        default: ""
+      targets:
+        description: "Name them: EIS URLs, procurement ids or IUB notice uuids, one per line. Added to the window above, deduplicated"
+        required: false
+      shards:
+        description: "How many runners split the list. Each gets its own address and its own gentle pace"
+        required: false
+        default: "4"
+      llm_max_files:
+        description: cap on files sent to the scan lane per tender
+        required: false
+        default: "40"
+      pause:
+        description: "Ceiling on the pause between records; small records already cost less"
+        required: false
+        default: "5"
+      skip_archive:
+        description: "Take only the governing documents, not superseded ones (28% fewer files)"
+        required: false
+        type: boolean
+        default: false
+      country:
+        description: "which country this run is for. This repository fetches LV"
+        required: false
+        default: "LV"
+      date:
+        description: "The day this batch belongs to, YYYY-MM-DD. The caller owns it; blank means the runner's UTC date"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+  actions: read
+
+# Shards share a run and are counted; two runs are not. This is the one case the shard
+# design does not cover, so it stays.
+concurrency:
+  group: eis-batch
+  cancel-in-progress: false
+
+jobs:
+  shards:
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    uses: ./.github/workflows/eis-shard-chain.yml
+    secrets: inherit
+    with:
+      shard: ${{ matrix.shard }}
+      shards: ${{ fromJSON(inputs.shards || '4') }}
+      days: ${{ inputs.days || '1' }}
+      date_from: ${{ inputs.date_from || '' }}
+      date_to: ${{ inputs.date_to || '' }}
+      targets: ${{ inputs.targets || '' }}
+      llm_max_files: ${{ inputs.llm_max_files || '40' }}
+      pause: ${{ inputs.pause || '5' }}
+      skip_archive: ${{ inputs.skip_archive || false }}
+      date: ${{ inputs.date || '' }}
+      country: ${{ inputs.country || 'LV' }}
+  # THE DAY'S LIST, AND THE PROOF THAT THERE IS A DAY.
+  #
+  # A reader that lists folders to find its work reads the wrong day: delivery overwrites files
+  # and never removes folders, so a date fetched twice holds tenders from both runs, and nothing
+  # in a folder says which run put it there. `collect_day.py` reads the shards' delivered
+  # indexes and writes `<date>/day.json` — every tender, its address on the drive, its size, and
+  # which slice of the day it belongs to.
+  #
+  # `if: always()` because a failed shard is the ordinary case this list exists to describe: the
+  # missing number lands in `shards_missing` and the day is marked incomplete rather than
+  # quietly short. It runs last so that a list which exists was written after everything it
+  # names — the same rule the shard index already follows.
+  collect:
+    needs: shards
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      # Pinned to a full SHA because this repository's Actions policy allows nothing
+      # else — the same pin eis-shard.yml uses. A floating tag is a startup failure.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Silent about where it writes, like the delivery it follows: every coordinate is a
+      # secret, and the script prints counts rather than paths. With no secrets configured the
+      # step does not run and the workflow stays usable by anyone without carrying addresses.
+      - name: Write the day's list
+        if: ${{ env.HAVE_GRAPH == 'true' }}
+        env:
+          HAVE_GRAPH: ${{ secrets.GRAPH_DRIVE_ID != '' }}
+          GRAPH_TENANT_ID: ${{ secrets.GRAPH_TENANT_ID }}
+          GRAPH_CLIENT_ID: ${{ secrets.GRAPH_CLIENT_ID }}
+          GRAPH_CLIENT_SECRET: ${{ secrets.GRAPH_CLIENT_SECRET }}
+          GRAPH_DRIVE_ID: ${{ secrets.GRAPH_DRIVE_ID }}
+          GRAPH_DEST_ROOT: ${{ secrets.GRAPH_DEST_ROOT }}
+          EIS_COUNTRY: ${{ inputs.country || 'LV' }}
+          RUN_DATE: ${{ inputs.date }}
+        run: |
+          python3 collect_day.py             --date "${RUN_DATE:-$(date -u +%F)}"             --shards "${{ fromJSON(inputs.shards || '4') }}"             --slices 4             --run-id "${{ github.run_id }}"

@@ -1,0 +1,170 @@
+name: eis-fetch
+
+# The egress worker. The consumer's sandbox has no outbound HTTPS; a runner does. Changing
+# URL in eis_request.txt is the whole trigger — one line, one tender, one artifact.
+on:
+  push:
+    paths: [eis_request.txt]
+  workflow_dispatch:
+    inputs:
+      url:
+        description: EIS procurement URL (overrides eis_request.txt)
+        required: false
+
+permissions:
+  contents: read
+  actions: read
+
+# One run at a time. Two runs hitting EIS in the same second left one of them holding a page
+# without the published marker, which the downloader then called "not a published procurement
+# page" about a tender that plainly was.
+concurrency:
+  group: eis-fetch
+  cancel-in-progress: false
+
+jobs:
+  # EIS refuses part of the GitHub runner address space, and this was very nearly mistaken
+  # for a throttle earned by pulling too much. Runners probed it in the same second while
+  # downloading nothing: some were served in about a second, others refused at the TCP
+  # layer, and IUB answered all of them. Volume had nothing to do with it — a substantial
+  # share of runners simply draw a blocked address.
+  #
+  # A runner's address is fixed for the life of its job, so the only way to draw again is a
+  # new job. These attempts run one after another on fresh runners; a draw that cannot reach
+  # EIS stands down in about thirty seconds without failing the run, and a draw that can does
+  # the work. Enough independent draws makes losing all of them very unlikely. Self-dispatch
+  # would be the obvious alternative and does not work: GitHub refuses to start a workflow
+  # from an event raised with GITHUB_TOKEN.
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        draw: [1, 2, 3, 4, 5, 6]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Draw ${{ matrix.draw }} — has the work been done, and can this runner reach EIS
+        id: go
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          URL="${{ inputs.url }}"
+          if [ -z "$URL" ]; then URL="$(head -n1 eis_request.txt | tr -d '[:space:]')"; fi
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+
+          # Ask for the SUCCESS artifact by name. The first version asked whether ANY
+          # artifact existed — and a failed draw uploads its evidence as an artifact, so
+          # one failure convinced draws 2-6 the work was done and the whole run stood down.
+          done_flag=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts" \
+                      --jq '[.artifacts[].name] | index("eis-tender-normalized") != null' \
+                      2>/dev/null || echo false)
+          if [ "$done_flag" = "true" ]; then
+            echo "an earlier draw already produced the output — standing down"
+            echo "go=no" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+
+          echo "runner address: $(curl -s --max-time 15 https://api.ipify.org || echo unknown)"
+          code=$(curl -s -o /dev/null --connect-timeout 20 --max-time 40 \
+                 -A 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/131.0.0.0' \
+                 -H 'Accept-Language: lv,en;q=0.8' \
+                 -w '%{http_code}' "$URL" || echo 000)
+          echo "EIS answered: $code"
+          if [ "$code" = "000" ]; then
+            echo "this runner drew an address EIS refuses — standing down for the next draw"
+            echo "go=no" >> "$GITHUB_OUTPUT"
+          else
+            echo "go=yes" >> "$GITHUB_OUTPUT"
+          fi
+
+      # LibreOffice is here to read Word 97 attachments, which buyers still send and which no
+      # Python library reads reliably. It converts without a model and without a network call,
+      # so the extract stays deterministic and costs no tokens.
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        if: steps.go.outputs.go == 'yes'
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install
+        if: steps.go.outputs.go == 'yes'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            p7zip-full libreoffice-writer libreoffice-calc libreoffice-impress \
+            tesseract-ocr tesseract-ocr-lav
+          python -m pip install -q -r requirements.txt
+          soffice --version
+
+      # Seconds, no network. The draw that reaches EIS is scarce — spending it on code that
+      # cannot parse its own fixtures is the one waste that cannot be retried.
+      - name: Test
+        if: steps.go.outputs.go == 'yes'
+        run: python3 -m unittest discover -s tests -t tests
+
+      - name: Download
+        if: steps.go.outputs.go == 'yes'
+        run: python3 eis_fetch.py "${{ steps.go.outputs.url }}" --out out
+
+      - name: Normalize
+        if: steps.go.outputs.go == 'yes'
+        run: python3 normalize.py --in out --out out/normalized
+
+      # Optional and quarantined: reads only the files the extractor listed as unreadable,
+      # writes only into out/llm/. Without the secret the step is a no-op and the pack is
+      # exactly as complete as it was before. Never fails the run — a scan left unread is
+      # the state we are already in.
+      - name: Read the scans a decoder cannot
+        if: steps.go.outputs.go == 'yes'
+        continue-on-error: true
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: python3 assist.py --pack out || true
+
+      # Integrity is asserted on the runner and again after retrieval, so a truncated transfer
+      # cannot look like a clean download.
+      - name: Verify and report
+        if: steps.go.outputs.go == 'yes'
+        run: python3 verify.py --out out
+
+      # The text is the product, and it is small. The originals are 200x bigger and rarely
+      # needed twice — shipped together, one 486 MB tender made every consumer pull 465 MB
+      # to read 2 MB of Markdown, and two such runs exhaust a private repo's artifact
+      # quota. Split artifacts: text kept two weeks, originals three days.
+      - name: Upload the text
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ steps.go.outputs.go == 'yes' && success() }}
+        with:
+          name: eis-tender-normalized
+          path: |
+            out/manifest.json
+            out/summary.json
+            out/procurement.json
+            out/normalized/**
+            out/llm/**
+          retention-days: 14
+
+      - name: Upload the originals
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ steps.go.outputs.go == 'yes' && success() }}
+        with:
+          name: eis-tender-originals
+          path: out/eis_*_originals.zip
+          retention-days: 3
+          compression-level: 0
+
+      # Evidence outlives a failure — a run that dies leaving nothing behind forces the
+      # next diagnosis to be a guess. Named per draw and never like the success artifact,
+      # so a failed draw's leftovers cannot masquerade as finished work.
+      - name: Upload evidence of the failure
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: ${{ steps.go.outputs.go == 'yes' && failure() }}
+        with:
+          name: eis-fetch-evidence-draw-${{ matrix.draw }}
+          path: |
+            out/unexpected_page.html
+            out/manifest.json
+          retention-days: 5
+          if-no-files-found: ignore

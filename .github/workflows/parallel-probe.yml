@@ -1,0 +1,100 @@
+name: parallel-probe
+
+# ONE QUESTION: does EIS throttle per address, or per service?
+#
+# It decides whether a day of tenders may be split across several runners. If the limit is
+# per ADDRESS, splitting is free speed — each runner keeps the same gentle pace and the
+# portal sees several ordinary clients. If it is per SERVICE, splitting multiplies the
+# aggregate rate and earns exactly the throttling we have been avoiding.
+#
+# We do not know which, and the one piece of evidence we had for "per service" has since
+# been withdrawn: `eis-fetch.yml` serialises runs because two of them once left one holding
+# "a page without the published marker" — and that page turned out to be the tender served
+# in English (see eis_page.is_published). So the serialisation may be guarding nothing.
+#
+# THE DISCRIMINATOR, which this run is built around:
+#   * a REFUSED ADDRESS fails at request #1, before any volume — nothing to do with pace;
+#   * EARNED THROTTLING starts fine and degrades PART WAY THROUGH.
+# So each shard makes a long, steady series of small requests and reports WHEN it first
+# went wrong, not merely whether it did. A shard that fails on request 1 is discarded from
+# the comparison; a shard that fails at request 40 is the finding.
+#
+# Deliberately outside the `eis-fetch` concurrency group — the whole point is to overlap.
+# It downloads nothing: page fetches only, so the bytes moved are a rounding error.
+
+on:
+  workflow_dispatch:
+    inputs:
+      shards:
+        description: how many runners to send at the portal at once
+        required: false
+        default: "4"
+      requests:
+        description: page requests per shard
+        required: false
+        default: "40"
+      pause:
+        description: seconds between requests within a shard
+        required: false
+        default: "5"
+
+permissions:
+  contents: read
+
+jobs:
+  hit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Shard ${{ matrix.shard }}
+        run: |
+          SHARDS="${{ inputs.shards }}"; [ -z "$SHARDS" ] && SHARDS=4
+          N="${{ inputs.requests }}"; [ -z "$N" ] && N=40
+          PAUSE="${{ inputs.pause }}"; [ -z "$PAUSE" ] && PAUSE=5
+          if [ "${{ matrix.shard }}" -gt "$SHARDS" ]; then
+            echo "shard ${{ matrix.shard }} not in this experiment ($SHARDS requested)"
+            exit 0
+          fi
+
+          ADDR=$(curl -s --max-time 15 https://api.ipify.org || echo unknown)
+          echo "shard ${{ matrix.shard }} · address $ADDR · $N requests · ${PAUSE}s apart"
+
+          # Real procurement pages, a different one each time, so nothing is served from a
+          # cache and every request is the same kind of work a real run does.
+          BASE=178400
+          ok=0; bad=0; first_bad=""
+          for i in $(seq 1 "$N"); do
+            pid=$((BASE + i * 7 + ${{ matrix.shard }}))
+            code=$(curl -s -o /tmp/p.html --connect-timeout 20 --max-time 45 \
+                   -A 'eis-tool/1.0 (+public procurement monitoring)' \
+                   -H 'Accept-Language: lv,en;q=0.8' -w '%{http_code}' \
+                   "https://www.eis.gov.lv/EKEIS/Supplier/Procurement/$pid" || echo 000)
+            size=$(wc -c < /tmp/p.html 2>/dev/null || echo 0)
+            # A published page carries the platform's own document arrays. Language-neutral
+            # on purpose: the Latvian heading is not a reliable marker.
+            if [ "$code" = "000" ] || { [ "$code" = "200" ] && [ "$size" -gt 1000 ] && ! grep -q "ActualDocuments_items" /tmp/p.html; }; then
+              bad=$((bad + 1))
+              [ -z "$first_bad" ] && first_bad=$i
+              echo "  request $i: BAD (http $code, $size bytes)"
+            else
+              ok=$((ok + 1))
+            fi
+            sleep "$PAUSE"
+          done
+
+          echo "RESULT shard=${{ matrix.shard }} address=$ADDR ok=$ok bad=$bad first_bad=${first_bad:-none}"
+          # first_bad=1 means the address was refused from the start — that is the lottery,
+          # not the pace, and it says nothing about parallelism.
+          if [ "${first_bad:-0}" = "1" ]; then
+            echo "verdict: this address was refused from the first request — excluded"
+          elif [ -n "$first_bad" ]; then
+            echo "verdict: started fine and degraded at request $first_bad — THIS is throttling"
+          else
+            echo "verdict: clean through $N requests alongside $((SHARDS - 1)) other runners"
+          fi

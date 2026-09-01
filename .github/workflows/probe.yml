@@ -1,0 +1,68 @@
+name: probe
+
+# Diagnostic only. Answers one question: can a GitHub runner reach the Latvian procurement
+# platforms at all, or does EIS refuse this IP range? A blocked egress and a site outage
+# look identical from one failed download, so this checks several hosts from the runner and
+# prints the raw result for each.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Where are we
+        run: |
+          echo "runner egress IP: $(curl -s --max-time 20 https://api.ipify.org || echo unknown)"
+
+      - name: Reach each host
+        run: |
+          probe() {
+            printf '%-46s ' "$1"
+            curl -s -o /dev/null --connect-timeout 15 --max-time 40 \
+                 -A 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/131.0.0.0' \
+                 -w 'HTTP %{http_code} | connect %{time_connect}s | total %{time_total}s\n' \
+                 "$1" || echo "FAILED (curl exit $?)"
+          }
+          probe https://example.com
+          probe https://api.github.com
+          probe https://infob.iub.gov.lv/api/classifiers
+          probe https://open.iub.gov.lv/data/publiskie_iepirkumi_metadata.json
+          probe https://eformsb.pvs.iub.gov.lv/
+          probe https://www.eis.gov.lv/
+          probe https://www.eis.gov.lv/EKEIS/Supplier/Procurement/178345
+        continue-on-error: true
+
+      # Reachability is not the same as being served the right page. A throttled EIS answers
+      # with 131 KB of something else, which looks like success to anything that only checks
+      # the status code.
+      - name: What does EIS actually serve
+        run: |
+          curl -sS --compressed --connect-timeout 30 --max-time 90 \
+               -A 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/131.0.0.0' \
+               -H 'Accept-Language: lv,en;q=0.8' \
+               https://www.eis.gov.lv/EKEIS/Supplier/Procurement/178345 > page.html || true
+          echo "bytes: $(wc -c < page.html)"
+          echo "title: $(sed -n 's:.*<title>\(.*\)</title>.*:\1:p' page.html | head -1)"
+          for probe in 'Iepirkuma pamatdati' '__RequestVerificationToken' 'ActualDocuments_items'; do
+            if grep -qF "$probe" page.html; then echo "present : $probe"; else echo "MISSING : $probe"; fi
+          done
+          echo "--- first visible text ---"
+          sed -e 's/<[^>]*>/ /g' page.html | tr -s ' \n' ' \n' | grep -v '^\s*$' | head -12
+        continue-on-error: true
+
+      - name: TCP and TLS to EIS
+        run: |
+          echo "--- DNS ---"; getent hosts www.eis.gov.lv || echo "no A record"
+          echo "--- TCP 443 ---"
+          timeout 15 bash -c 'cat < /dev/null > /dev/tcp/www.eis.gov.lv/443' \
+            && echo "tcp connect OK" || echo "tcp connect FAILED"
+          echo "--- traceroute (first hops) ---"
+          command -v traceroute >/dev/null || sudo apt-get install -y -qq traceroute
+          timeout 40 traceroute -m 12 -w 2 www.eis.gov.lv 2>&1 | tail -8 || true
+        continue-on-error: true

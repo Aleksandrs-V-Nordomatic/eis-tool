@@ -1,0 +1,61 @@
+name: image
+
+# Builds the toolchain image and pushes it to this repository's own registry.
+#
+# NO THIRD-PARTY ACTION HERE, DELIBERATELY. The repository allows GitHub-authored actions
+# only, and the usual docker/build-push-action is not one. `docker build` and `docker push`
+# are already on the runner, so the policy costs nothing to keep.
+#
+# Rebuilt only when the toolchain or its pins change. The image is what makes "same bytes
+# in, same text out" true of LibreOffice and Tesseract as well as of the Python packages,
+# so rebuilding it is a deliberate act: bump the base digest or requirements.txt, watch the
+# acceptance tender, and only then let it become `latest`.
+on:
+  push:
+    branches: [master]
+    paths:
+      - Dockerfile
+      - requirements.txt
+      - .github/workflows/image.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write          # the one job in this repository allowed to write anything
+
+concurrency:
+  group: image
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build
+        run: |
+          # Lower-case: the registry rejects capitals in a repository name, and this
+          # account has them.
+          REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          echo "IMAGE=ghcr.io/$REPO/toolchain" >> "$GITHUB_ENV"
+          docker build -t "ghcr.io/$REPO/toolchain:${{ github.sha }}" .
+
+      - name: Prove it can do the job before anyone depends on it
+        run: |
+          docker run --rm -v "$PWD:/work" -w /work \
+            "$IMAGE:${{ github.sha }}" \
+            python3 -m unittest discover -s tests -t tests
+
+      - name: Push
+        run: |
+          echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker push "$IMAGE:${{ github.sha }}"
+          # `latest` moves only after the tests passed inside the image itself.
+          docker tag "$IMAGE:${{ github.sha }}" "$IMAGE:latest"
+          docker push "$IMAGE:latest"
+          echo "pushed $IMAGE:latest and :${{ github.sha }}"
+          # eis-shard.yml reads this path from a repository variable rather than carrying
+          # an owner's account name in the tree. Say what to set it to.
+          echo "::notice::set repository variable TOOLCHAIN_IMAGE=$IMAGE:latest"

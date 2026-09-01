@@ -1,0 +1,20 @@
+{
+  "_what": "Example recall policy. Copy this shape into the EIS_POLICY secret; do not commit a real one.",
+  "_rule": "Excluded title term or an all-excluded code set => drop. Missing title => keep. Otherwise keep when the title contains a recall_title_terms root. Codes never veto a matching title.",
+  "_note": "The terms below are an unrelated illustration (office printing) chosen so that this file discloses nothing about any deployment's interests. Roots are matched as substrings, so they are written without inflected endings.",
+  "recall_title_terms": [
+    "druk",
+    "iespiedd",
+    "poligrāf",
+    "papīr",
+    "printing",
+    "stationery"
+  ],
+  "hard_exclude_prefixes": [
+    "30125"
+  ],
+  "hard_exclude_title_terms": [
+    "kartrid",
+    "toner"
+  ]
+}

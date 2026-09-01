@@ -1,0 +1,6 @@
+out/
+__pycache__/
+*.pyc
+
+# A real recall policy never belongs in the repository — it goes in the EIS_POLICY secret.
+cpv_policy.json
