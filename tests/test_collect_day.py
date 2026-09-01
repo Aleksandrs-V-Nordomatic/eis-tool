@@ -303,5 +303,51 @@ class Slices(unittest.TestCase):
         self.assertEqual(len(bins), 4)
 
 
+class TheIdSpace(unittest.TestCase):
+    """The one writer of the walk's memory, and what it may write.
+
+    Every shard asks about a slice of the night's ids and leaves its answers behind; this is
+    the only step that sees all four, and the only one that runs after all four.
+    """
+
+    def install(self, reports, prior=None, day_pids=()):
+        stored = {}
+
+        def json_at(drive, path, tok):
+            if path.endswith("/idspace.json"):
+                return prior
+            for n, report in reports.items():
+                if "eis-batch-shard-%d/idprobe.json" % n in path:
+                    return report
+            return None
+
+        self.addCleanup(setattr, collect_day, "json_at", collect_day.json_at)
+        collect_day.json_at = json_at
+        day = {"tenders": [{"pid": p} for p in day_pids]}
+        return collect_day.idspace_after("drive1", "base", "2026-09-02", 4, day, "t"), stored
+
+    def test_the_shards_answers_are_merged(self):
+        after, _ = self.install({1: {"probes": {"1001": True}},
+                                 3: {"probes": {"1002": False, "1003": True}}},
+                                prior={"schema": "idspace/1", "frontier": 1000, "live": [1000]})
+        self.assertEqual(after["live"], [1000, 1001, 1003])
+        self.assertEqual(after["blank"]["1002"]["n"], 1)
+        self.assertEqual(after["frontier"], 1003)
+
+    def test_the_day_seeds_a_frontier_before_the_walk_has_ever_run(self):
+        """First night: nothing was planned because there was no frontier. What the
+        register delivered becomes one, and the walk starts on the next run."""
+        after, _ = self.install({}, prior=None, day_pids=["1200", "1198"])
+        self.assertEqual(after["frontier"], 1200)
+
+    def test_nothing_asked_and_nothing_delivered_writes_nothing(self):
+        self.assertIsNone(self.install({}, prior=None)[0])
+
+    def test_a_shard_that_never_reported_is_simply_absent(self):
+        after, _ = self.install({2: {"probes": {"1001": True}}},
+                                prior={"schema": "idspace/1", "frontier": 1000, "live": [1000]})
+        self.assertEqual(after["live"], [1000, 1001])
+
+
 if __name__ == "__main__":
     unittest.main()
