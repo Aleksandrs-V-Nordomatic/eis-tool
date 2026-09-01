@@ -63,11 +63,30 @@ def load_policy(source=None):
     except ValueError:
         return None                       # an unreadable policy must fail open, never drop all
     recall = tuple(t.casefold() for t in (policy.get("recall_title_terms") or ()))
-    if not recall:
-        return None                       # incomplete policy must fail open, never drop all
+    exclude_prefixes = tuple(policy.get("hard_exclude_prefixes") or ())
+    exclude_titles = tuple(t.casefold() for t in (policy.get("hard_exclude_title_terms") or ()))
+    # A POLICY MAY BE EXCLUSIONS ONLY, AND FOR SOME CALLERS IT MUST BE.
+    #
+    # A recall list is a whitelist: a notice whose title carries none of its roots is
+    # dropped before a byte moves. That suits a caller who buys a nameable thing — the
+    # word is in the title or the notice is not theirs. It is exactly wrong for a caller
+    # whose work hides INSIDE somebody else's purchase, where the title names the building
+    # and the scope appears three documents down. For them the honest gate is the buyer's
+    # own classification: drop what the codes place outside, keep the rest, and let the
+    # documents decide. A whitelist in that position drops most of a day, and what it drops
+    # is the tenders the caller exists to find, because those are precisely the ones whose
+    # titles say nothing.
+    #
+    # So recall terms are now one optional half of a policy rather than the price of having
+    # one. `None` is still returned for a policy that says nothing at all — an absent,
+    # unreadable or empty policy means fetch everything, which stays the only safe
+    # direction for a filter that failed to load.
+    if not (recall or exclude_prefixes or exclude_titles
+            or policy.get("override_prefixes") or policy.get("recall_cpv_prefixes")):
+        return None                       # a policy with no rules is no policy
     return (recall,
-            tuple(policy.get("hard_exclude_prefixes") or ()),
-            tuple(t.casefold() for t in (policy.get("hard_exclude_title_terms") or ())),
+            exclude_prefixes,
+            exclude_titles,
             # CODES THAT SURVIVE THEIR OWN DIVISION. A control-system contract can carry a
             # main code inside an excluded division and nothing else — `72250000` software
             # services on a SCADA maintenance contract, `79711000` on an alarm-monitoring
@@ -124,6 +143,15 @@ def outside_scope(notice, policy):
     # bind — an excluded title term or an all-excluded code set has already returned — so
     # this widens what is fetched and can never drop anything the old gate kept.
     if recall_prefixes and any(c.startswith(recall_prefixes) for c in codes):
+        return False
+
+    # NO RECALL LIST MEANS NO WHITELIST, NOT AN EMPTY ONE. A policy that carries only
+    # exclusions has already had its say above: what the codes place outside is gone, and
+    # everything else is the caller's to read. Asking an empty recall list whether it
+    # matched would answer no for every notice on earth and drop the entire day — the one
+    # failure this gate is least allowed to cause, and the reason the check is here rather
+    # than left to the expression below.
+    if not recall_terms:
         return False
 
     if not title:
