@@ -31,6 +31,8 @@ import time
 import urllib.parse
 import urllib.request
 
+import net
+
 BASE = "https://viesiejipirkimai.lt/epps"
 FORM = BASE + "/prepareAdvancedSearch.do?type=cftFTS"
 SEARCH = BASE + "/viewCFTSAction.do"
@@ -83,7 +85,10 @@ class Session(object):
         self.opener = urllib.request.build_opener(
             urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
         self.opener.addheaders = [("User-Agent", UA)]
-        self.opener.open(FORM, timeout=60).read()
+        # The cookie jar is this object's whole reason to exist, so the shared policy is
+        # handed the opener rather than replacing it.
+        net.open_url(FORM, timeout=60, opener=self.opener,
+                     log=lambda line: print(line, file=sys.stderr))
 
     def page(self, criteria, number):
         body = dict(criteria, **{"mode": "advanced", "isFTS": "true", "type": "cftFTS",
@@ -91,7 +96,9 @@ class Session(object):
         request = urllib.request.Request(
             SEARCH, data=urllib.parse.urlencode(body).encode(),
             headers={"Content-Type": "application/x-www-form-urlencoded"})
-        return self.opener.open(request, timeout=90).read().decode("utf-8", "replace")
+        body, _ = net.open_url(request, timeout=90, opener=self.opener,
+                               log=lambda line: print(line, file=sys.stderr))
+        return body.decode("utf-8", "replace")
 
 
 def parse_rows(html, kind):

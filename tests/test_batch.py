@@ -294,6 +294,19 @@ class WindowAndList(unittest.TestCase):
         targets, _w, _u = batch.targets_from(self.named("500"))
         self.assertEqual(targets, ["500"])
 
+    def test_a_notice_the_register_would_not_answer_about_is_still_asked_for(self):
+        # It used to be dropped here, silently, alongside the notices that genuinely have no
+        # EIS procurement behind them — and the day then came up short with nothing saying
+        # so. It goes down under its uuid instead, to be asked once more at fetch time.
+        batch.eis_tool.discover = lambda **kw: {"notices": [
+            self.notice("1"),
+            {"eis_url": None, "uuid": "A1B2", "title": "unreachable", "cpv": None,
+             "unreachable": "could not reach the register"},
+            {"eis_url": None, "uuid": "C3D4", "title": "conducted elsewhere", "cpv": None},
+        ]}
+        targets, _w, _u = batch.targets_from(days=1)
+        self.assertEqual(targets, [self.url("1"), "A1B2"])
+
     def test_an_exact_date_range_is_a_window_even_beside_a_list(self):
         # This is how "yesterday, and these" is written: naming a range is how the window is
         # asked for alongside a list, and `days` stays the fallback for neither.

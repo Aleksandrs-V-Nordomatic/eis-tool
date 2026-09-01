@@ -30,7 +30,7 @@ out of scope; `eis_page.walk_ids` is the unused mechanism for it, kept and not w
 ## Use
 
 ```bash
-python3 eis_tool.py probe                        # can this address reach EIS at all
+python3 eis_tool.py probe                        # can this address reach the register and EIS
 python3 eis_tool.py resolve <iub-notice-uuid>    # notice → EIS URL
 python3 eis_tool.py run <eis-url|notice> --out pack
 ```

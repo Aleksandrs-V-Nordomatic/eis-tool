@@ -623,6 +623,7 @@ class ContentionIsRetried(unittest.TestCase):
 
     class Response(object):
         status = 200
+        headers = {}                       # a real response always carries them
 
         def __enter__(self):
             return self
@@ -668,6 +669,7 @@ class ChunkedUpload(unittest.TestCase):
         def __init__(self, body=b"{}", status=200):
             self.body = body
             self.status = status
+            self.headers = {}              # a real response always carries them
 
         def __enter__(self):
             return self

@@ -49,6 +49,7 @@ from console import say, utf8_streams
 
 import eis_fetch
 import eis_tool
+import net
 
 
 # WHAT A TENDER WILL WEIGH, GUESSED FROM WHAT THE REGISTER ALREADY SAYS.
@@ -309,13 +310,23 @@ def targets_from(path=None, days=None, date_from=None, date_to=None, no_gate=Fal
     and its packs come back `register_check: unverified`. A tender in both halves keeps the
     discovered version, which is the one that knows its notice.
     """
-    targets, weights, uuids, seen, dropped = [], {}, {}, set(), 0
+    targets, weights, uuids, seen, dropped, unreachable = [], {}, {}, set(), 0, 0
 
     if days is not None or date_from or date_to:
         found = eis_tool.discover(days=days or 1, date_from=date_from, date_to=date_to)
         policy = None if no_gate else load_policy()
         for n in found["notices"]:
             if not n["eis_url"]:
+                # A notice discovery could not ask about is not a notice without a link, and
+                # dropping it here is how a day used to come up short in silence. It goes
+                # down the ordinary path under its uuid: `as_url` asks once more at fetch
+                # time — minutes later, which is usually long enough — and names it in
+                # failed.txt if it still cannot. A notice that genuinely has no EIS
+                # procurement behind it is skipped exactly as it always was.
+                if n.get("unreachable") and not outside_scope(n, policy):
+                    targets.append(n["uuid"])
+                    seen.add("iub:%s" % n["uuid"].casefold())
+                    unreachable += 1
                 continue
             if outside_scope(n, policy):
                 dropped += 1
@@ -332,6 +343,9 @@ def targets_from(path=None, days=None, date_from=None, date_to=None, no_gate=Fal
         if dropped:
             say("pre-download filter: %d of %d notice(s) matched no recall term - not fetched"
                 % (dropped, dropped + len(targets)))
+        if unreachable:
+            say("discovery could not reach the register for %d notice(s) - carried down by "
+                "uuid and asked again below" % unreachable)
 
     if path:
         asked = named_targets(path)
@@ -351,13 +365,19 @@ def targets_from(path=None, days=None, date_from=None, date_to=None, no_gate=Fal
 
 
 def as_url(target):
-    """Accept an EIS URL, a bare procurement id, or an IUB notice uuid."""
+    """Accept an EIS URL, a bare procurement id, or an IUB notice uuid.
+
+    Raises `net.Unreachable` when the register could not be asked, rather than returning
+    None. The caller reports the two apart: "no EIS procurement behind it" is a fact about
+    the purchase and sends a reader to the portal; "could not reach the register" is a fact
+    about this run and sends them nowhere. They read identically as a bare None.
+    """
     target = target.strip()
     if target.lower().startswith("http") and "iub.gov.lv" not in target:
         return target
     if target.isdigit():
         return eis_tool.eis_page.PAGE % target
-    return eis_tool.resolve(target)
+    return eis_tool.resolve(target, strict=True)
 
 
 def post_process(pack, llm_max_files=None):
@@ -467,7 +487,13 @@ def run(targets, out, llm_max_files=None, workers=1, sections=None, uuids=None):
 
     started = time.time()
     for position, target in enumerate(targets, 1):
-        url = as_url(target)
+        try:
+            url = as_url(target)
+        except net.Unreachable as exc:
+            resolved.append((str(target), "-"))
+            failed.append("%s — %s" % (target, exc))
+            say("  FAILED %s — could not reach the register to resolve it" % target)
+            continue
         if not url:
             resolved.append((str(target), "-"))
             failed.append("%s — no EIS procurement behind it" % target)
@@ -548,7 +574,11 @@ def main(argv=None):
     try:
         targets, weights, uuids = targets_from(args.targets, args.days, args.date_from,
                                                args.date_to, args.no_gate)
-    except RuntimeError as exc:
+    except (RuntimeError, net.Unreachable) as exc:
+        # Two refusals, one exit. `RuntimeError` is discovery declining to ship a window it
+        # cannot prove; `net.Unreachable` is the register never answering at all. Both mean
+        # this runner has no list, and neither means anything about a tender — so the shard
+        # fails loudly, the chain draws a fresh address, and nothing is recorded as absent.
         print(exc, file=sys.stderr)
         return 2
     whole_list = list(targets)

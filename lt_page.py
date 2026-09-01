@@ -34,7 +34,8 @@ that does not exist or is not public. A status code is therefore not a validity 
 import json
 import re
 import sys
-import urllib.request
+
+import net
 
 BASE = "https://viesiejipirkimai.lt/epps"
 PAGE = BASE + "/cft/prepareViewCfTWS.do?resourceId=%s"
@@ -104,9 +105,15 @@ _TAG = re.compile(r"(?is)<script.*?</script>|<style.*?</style>")
 
 
 def fetch(url):
-    req = urllib.request.Request(url, headers={"User-Agent": UA})
-    with urllib.request.urlopen(req, timeout=90) as r:
-        return r.read().decode("utf-8", "replace")
+    """One EPPS page, under the shared retry policy.
+
+    It had no retry at all, which is the same defect the Latvian lane was carrying in a
+    more elaborate disguise: there, a retry loop was written against the wrong exception
+    types; here, there was nothing to get wrong because there was nothing. A single reset
+    from EPPS ended the night either way.
+    """
+    return net.get_text(url, headers={"User-Agent": UA}, timeout=90,
+                        log=lambda line: print(line, file=sys.stderr))
 
 
 def is_published(page):

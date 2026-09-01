@@ -36,6 +36,7 @@ import urllib.request
 import zipfile
 
 import lt_page
+import net
 
 try:
     import changes as changes_mod
@@ -60,10 +61,10 @@ def archive(pid, timeout=300):
     """The whole tender, one request. Returns the bytes and what the portal called them."""
     request = urllib.request.Request(lt_page.ARCHIVE % pid,
                                      headers={"User-Agent": lt_page.UA})
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        data = response.read()
-        disposition = response.headers.get("content-disposition") or ""
-        kind = response.headers.get("content-type") or ""
+    data, headers = net.open_url(request, timeout=timeout,
+                                 log=lambda line: print(line, file=sys.stderr))
+    disposition = headers.get("content-disposition") or headers.get("Content-Disposition") or ""
+    kind = headers.get("content-type") or headers.get("Content-Type") or ""
     name = re.search(r'filename="?([^";]+)', disposition)
     if not data.startswith(b"PK"):
         # EPPS answers 200 with its login form for a resource it will not serve, so the

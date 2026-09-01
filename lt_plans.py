@@ -28,6 +28,8 @@ import re
 import time
 import urllib.request
 
+import net
+
 import lt_page
 
 try:
@@ -79,8 +81,8 @@ def register():
 def plan_file(submission_id, timeout=180):
     request = urllib.request.Request(PLAN % submission_id,
                                      headers={"User-Agent": lt_page.UA})
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        data = response.read()
+    data, _ = net.open_url(request, timeout=timeout,
+                           log=lambda line: print(line, file=sys.stderr))
     if not data[:4] in (b"\xd0\xcf\x11\xe0", b"PK\x03\x04"):
         # OLE2 for the .xls the template is, PK for a buyer who saved it as .xlsx. Anything
         # else is EPPS answering with a page, which it does under 200.

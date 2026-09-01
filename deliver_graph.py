@@ -75,6 +75,7 @@ import urllib.request
 import zipfile
 
 import changes
+import net
 
 GRAPH = "https://graph.microsoft.com/v1.0"
 LOGIN = "https://login.microsoftonline.com/%s/oauth2/v2.0/token"
@@ -158,8 +159,10 @@ def token(tenant, client_id, client_secret):
         "grant_type": "client_credentials",
     }).encode()
     req = urllib.request.Request(LOGIN % tenant, data=body)
-    with urllib.request.urlopen(req, timeout=60) as r:
-        return json.load(r)["access_token"]
+    # The first request of the delivery, and until now the only one with no retry at all: a
+    # single reset here threw away a whole day that had already been downloaded.
+    payload, _ = net.open_url(req, timeout=60, parse=json.loads)
+    return payload["access_token"]
 
 
 def escaped(path):
@@ -194,11 +197,12 @@ def get(url, tok, tries=4):
                 time.sleep(min(wait, 60))
                 continue
             raise SystemExit("read failed: HTTP %d after %d attempt(s)" % (e.code, attempt + 1))
-        except urllib.error.URLError:
+        except net.TRANSPORT_ERRORS as exc:
             if attempt < tries - 1:
-                time.sleep(2 ** attempt)
+                time.sleep(net.delay(attempt, exc))
                 continue
-            raise SystemExit("read failed: transport error after %d attempts" % tries)
+            raise SystemExit("read failed: transport error after %d attempts (%s)"
+                             % (tries, type(exc).__name__))
     raise SystemExit("read failed: retries exhausted")
 
 
@@ -252,11 +256,12 @@ def put(url, data, tok, content_type="application/octet-stream", tries=5):
             # The body can quote the destination path; report the code only.
             raise SystemExit("upload failed: HTTP %d after %d attempt(s)"
                              % (e.code, attempt + 1))
-        except urllib.error.URLError as e:
+        except net.TRANSPORT_ERRORS as exc:
             if attempt < tries - 1:
-                time.sleep(2 ** attempt)
+                time.sleep(net.delay(attempt, exc))
                 continue
-            raise SystemExit("upload failed: transport error after %d attempts" % tries)
+            raise SystemExit("upload failed: transport error after %d attempts (%s)"
+                             % (tries, type(exc).__name__))
     raise SystemExit("upload failed: retries exhausted")
 
 
@@ -274,8 +279,8 @@ def upload_stream(drive, dest, stream, size, tok):
         method="POST")
     req.add_header("Authorization", "Bearer " + tok)
     req.add_header("Content-Type", "application/json")
-    with urllib.request.urlopen(req, timeout=60) as r:
-        url = json.load(r)["uploadUrl"]
+    session, _ = net.open_url(req, timeout=60, parse=json.loads)
+    url = session["uploadUrl"]
 
     offset = 0
     while offset < size:
@@ -299,11 +304,12 @@ def upload_stream(drive, dest, stream, size, tok):
                     continue
                 raise SystemExit("upload session failed: HTTP %d after %d attempt(s)"
                                  % (e.code, attempt + 1))
-            except urllib.error.URLError:
+            except net.TRANSPORT_ERRORS as exc:
                 if attempt < 4:
-                    time.sleep(2 ** attempt)
+                    time.sleep(net.delay(attempt, exc))
                     continue
-                raise SystemExit("upload session failed: transport error after 5 attempts")
+                raise SystemExit("upload session failed: transport error after 5 attempts (%s)"
+                                 % type(exc).__name__)
         offset = end + 1
 
 

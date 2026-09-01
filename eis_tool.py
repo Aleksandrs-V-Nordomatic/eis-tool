@@ -3,7 +3,7 @@
 """
 One tender, end to end: find it, download it, read it, say what could not be read.
 
-    python3 eis_tool.py probe                                 # can this address reach EIS
+    python3 eis_tool.py probe                                 # can this address reach register + EIS
     python3 eis_tool.py resolve 1b4e28ba-...-0016d3cca427     # IUB notice -> EIS URL
     python3 eis_tool.py fetch  https://www.eis.gov.lv/EKEIS/Supplier/Procurement/178345 --out out
     python3 eis_tool.py extract --pack out                    # deterministic text
@@ -20,6 +20,10 @@ partly served in about a second, while the register answers all of them. A faile
 is therefore evidence about the address we drew, never about the tender — so the run asks
 first, cheaply, and stands down for the next draw instead of concluding anything about a
 procurement.
+
+It asks about all three hosts, not one. A run reaches the register twice — the search API,
+then one notice page per hit — before it ever addresses EIS, and a gate that consulted only
+EIS passed runners whose very first request was then refused by a host nobody had asked.
 """
 
 import argparse
@@ -33,13 +37,14 @@ import tempfile
 
 import eis_fetch
 import eis_page
+import net
 from console import utf8_streams
 
 UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
 
 
-def probe(url=eis_page.BASE, timeout=40):
-    """(reachable, detail). One request, no downloads — the address is the only variable."""
+def _reach(url, timeout=40):
+    """(reachable, detail) for one host. One request, no downloads."""
     try:
         done = subprocess.run(
             ["curl", "-s", "-o", os.devnull, "--connect-timeout", "20",
@@ -50,8 +55,37 @@ def probe(url=eis_page.BASE, timeout=40):
         return False, "curl could not run: %s" % exc
     code = (done.stdout or b"").decode("utf-8", "replace").strip()
     if code in ("", "000"):
-        return False, "no TCP connection — this address is refused, the tender is unknown"
-    return True, "EIS answered %s" % code
+        return False, "no TCP connection — this address is refused"
+    return True, "answered %s" % code
+
+
+# Every host a discovery run opens, in the order it opens them. The first two are the
+# register; EIS is third and used to be the only one asked about. That mattered: a runner
+# stood down or went ahead on EIS's answer and then made its first request to
+# infob.iub.gov.lv — a different service, which had its own opinion and was never consulted.
+# The gate said the address was good, and it was, about a host the run had not reached yet.
+DOORS = (("register search", "https://infob.iub.gov.lv/api/search?limit=1&page=1"),
+         ("register notices", "https://eformsb.pvs.iub.gov.lv/"),
+         ("EIS", eis_page.BASE))
+
+
+def probe(url=None, timeout=40):
+    """(reachable, detail). Every door this run has to walk through, not just the last one.
+
+    EIS refuses part of the cloud address space at the TCP layer, and that is what this
+    check was built for. It is not the only thing that can refuse us, and a gate that
+    passes a runner which then cannot make its first request is worse than no gate: it
+    converts a stand-down, which costs one draw, into a crash, which costs the shard.
+    """
+    if url is not None:
+        return _reach(url, timeout)
+    detail = []
+    for name, door in DOORS:
+        ok, why = _reach(door, timeout)
+        detail.append("%s %s" % (name, why))
+        if not ok:
+            return False, "; ".join(detail) + " — standing down, the tender is unknown"
+    return True, "; ".join(detail)
 
 
 def address():
@@ -64,17 +98,28 @@ def address():
         return "unknown"
 
 
-def resolve(notice, timeout=45):
+def resolve(notice, timeout=45, strict=False):
     """An IUB notice uuid or URL -> the EIS procurement URL, or None.
 
     The register's search API returns the notice and never the platform link, so this hop
     cannot be skipped: uuid -> notice HTML -> EIS id -> documents.
+
+    TWO ANSWERS THAT ARE NOT THE SAME, AND USED TO BE. `None` meant both "the register
+    served the notice and it names no EIS procurement" — a fact about a purchase conducted
+    somewhere else — and "we never reached the register". Discovery skips a notice with no
+    link, silently and by design, so the second answer was being filed as the first: a
+    connection reset during resolution shrank the day, and nothing downstream could tell.
+    Coverage is proven against the register's own total *before* this step, so the proof did
+    not cover it either. `strict=True` separates them, and discovery asks for it.
     """
     url = eis_page.IUB_NOTICE % notice if UUID.match(notice.strip()) else notice
     workdir = tempfile.mkdtemp(prefix="eis_resolve_")
     try:
         html = eis_fetch.Curl(workdir, url).get_text(url)
-    except eis_fetch.Fail:
+    except eis_fetch.Fail as exc:
+        # curl has already spent its own --retry budget by the time this raises.
+        if strict:
+            raise net.Unreachable("could not reach the register for %s: %s" % (notice, exc))
         return None
     finally:
         import shutil
@@ -108,7 +153,9 @@ def discover(days=1, date_from=None, date_to=None, resolve_links=True):
     for after a publication, but a day is not finished until its last notice, near midnight.
 
     A notice with no EIS link is not an error: it is a procurement conducted somewhere else,
-    and it is reported as such rather than dropped.
+    and it is reported as such rather than dropped. A notice we could not ask about is a
+    different thing entirely and is kept apart from it — see the resolution block below,
+    which is proven the way coverage is and for the same reason.
     """
     import datetime as dt
     import harvest
@@ -125,15 +172,65 @@ def discover(days=1, date_from=None, date_to=None, resolve_links=True):
         raise RuntimeError("register coverage not proven: %d unique of %d claimed"
                            % (coverage["unique"], coverage["expected"]))
 
-    found = []
-    for record in raw:
-        if record.get("type") not in harvest.BIDDABLE:
+    biddable = [harvest.normalise(r) for r in raw if r.get("type") in harvest.BIDDABLE]
+
+    # RESOLUTION IS PROVEN THE SAME WAY COVERAGE IS, AND PROPORTIONATELY. A notice whose
+    # link could not be asked for is held apart from one that answered "no link", because
+    # those two are indistinguishable once they reach the caller and only one of them is a
+    # fact. Unreachable notices get one more pass; the register recovers on the scale of
+    # seconds and this costs nothing on the ordinary day, where the list is empty.
+    #
+    # What happens to the survivors depends on what they say about the register, and the
+    # boundary is a property rather than a threshold:
+    #
+    #   nothing resolved at all  the register is not answering this runner. Refuse the
+    #                            window: standing down costs one draw, and shipping a day
+    #                            of nothing but gaps costs the day.
+    #   some resolved, some not  the register is up and these particular notices are the
+    #                            problem. Ship, and carry them down by uuid so the run
+    #                            asks once more at fetch time and names them in failed.txt
+    #                            if it still cannot. A short day is still a day, and it
+    #                            says which tenders it is short of.
+    found, pending = [], []
+    for notice in biddable:
+        if not (resolve_links and notice["uuid"]):
+            found.append(dict(notice, eis_url=None))
             continue
-        notice = harvest.normalise(record)
-        url = resolve(notice["uuid"]) if resolve_links and notice["uuid"] else None
-        found.append(dict(notice, eis_url=url))
+        try:
+            found.append(dict(notice, eis_url=resolve(notice["uuid"], strict=True)))
+        except net.Unreachable:
+            pending.append(notice)
+
+    unreachable = []
+    if pending:
+        print("resolution: %d notice(s) unreachable, asking once more" % len(pending),
+              file=sys.stderr)
+        for notice in pending:
+            try:
+                found.append(dict(notice, eis_url=resolve(notice["uuid"], strict=True)))
+            except net.Unreachable as exc:
+                unreachable.append(notice["uuid"])
+                found.append(dict(notice, eis_url=None, unreachable=str(exc)[:200]))
+
+    linked = sum(1 for n in found if n["eis_url"])
+    if unreachable and not linked:
+        raise RuntimeError(
+            "register resolution not proven: none of %d biddable notice(s) could be asked "
+            "for its EIS link — this runner is not reaching the register, and a window of "
+            "nothing but gaps is not a window. Standing down for a fresh draw." % len(biddable))
+    if unreachable:
+        print("resolution: %d of %d notice(s) still unreachable — carried down by uuid, to "
+              "be asked again at fetch time and named if they still cannot be reached"
+              % (len(unreachable), len(biddable)), file=sys.stderr)
+
+    resolution = {"biddable": len(biddable),
+                  "linked": linked,
+                  "unlinked": sum(1 for n in found if not n["eis_url"] and not n.get("unreachable")),
+                  "unreachable": len(unreachable),
+                  "retried": len(pending),
+                  "proven": not unreachable}
     return {"from": start.isoformat(), "to": end.isoformat(), "coverage": coverage,
-            "notices": found}
+            "resolution": resolution, "notices": found}
 
 
 def extract(pack, with_images=False, keep_unpacked=False):
@@ -215,7 +312,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.strip().split("\n")[0])
     sub = ap.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("probe", help="can this address reach EIS at all")
+    sub.add_parser("probe", help="can this address reach the register and EIS at all")
     p = sub.add_parser("resolve", help="IUB notice uuid or URL -> EIS URL")
     p.add_argument("notice")
 

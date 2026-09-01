@@ -23,9 +23,9 @@ import json
 import os
 import sys
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
+
+import net
 
 API = "https://infob.iub.gov.lv/api/search"
 NOTICE_URL = "https://eformsb.pvs.iub.gov.lv/show/{uuid}"
@@ -40,24 +40,21 @@ BIDDABLE = {"competition", "planning"}
 
 PAGE_LIMIT = 200
 MAX_PAGES = 200
-RETRIES = 4
+RETRIES = 5
 FRESHNESS_CEILING_HOURS = 36
 
 
 def _get(url, tries=RETRIES):
-    """GET with backoff. Returns (parsed_json, headers)."""
-    last = None
-    for attempt in range(tries):
-        try:
-            req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "application/json"})
-            with urllib.request.urlopen(req, timeout=60) as resp:
-                body = resp.read().decode("utf-8")
-                return json.loads(body), dict(resp.headers)
-        except (urllib.error.URLError, urllib.error.HTTPError, ValueError, TimeoutError) as exc:
-            last = exc
-            if attempt < tries - 1:
-                time.sleep(0.4 * (2 ** attempt))
-    raise RuntimeError("GET failed after %d tries: %s — %s" % (tries, url, last))
+    """GET with backoff. Returns (parsed_json, headers).
+
+    The policy lives in `net` and not here. It used to live here, written as a tuple of
+    urllib exception types, and it was the wrong tuple: the register answers a run it does
+    not want by resetting the connection, which arrives as `http.client.RemoteDisconnected`
+    — an OSError and an HTTPException, and neither a `URLError` nor a `TimeoutError`. Four
+    attempts were budgeted and none was ever spent. See net.py for the hierarchy in full.
+    """
+    return net.get_json(url, headers={"User-Agent": UA, "Accept": "application/json"},
+                        timeout=60, tries=tries, log=lambda line: print(line, file=sys.stderr))
 
 
 def fetch_window(date_from, date_to):

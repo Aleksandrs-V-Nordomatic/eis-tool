@@ -67,6 +67,8 @@ import time
 import urllib.error
 import urllib.request
 
+import net
+
 from console import say, utf8_streams
 
 # The reasons worth spending a request on. A scan is a document somebody wrote and nobody
@@ -192,6 +194,12 @@ def gemini_send(blob, mime, model, api_key, timeout=180):
     request = urllib.request.Request(
         ENDPOINT % model, data=body,
         headers={"Content-Type": "application/json", "x-goog-api-key": api_key})
+    # The HTTPError arm comes first and keeps its own meaning: 429 and 503 are the provider
+    # saying the free tier is spent, which the caller counts and stops on, and retrying them
+    # here would spend the loop re-asking a settled question. Everything below it is the
+    # transport, which says nothing about quota — and used to escape as a bare OSError past
+    # the per-file `except RuntimeError` that exists to keep one unreadable scan from ending
+    # the lane.
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             payload = json.loads(response.read().decode("utf-8", "replace"))
@@ -201,6 +209,8 @@ def gemini_send(blob, mime, model, api_key, timeout=180):
             raise Quota("provider is out of free quota or overloaded (%d): %s"
                         % (exc.code, detail))
         raise RuntimeError("provider refused (%d): %s" % (exc.code, detail))
+    except net.TRANSPORT_ERRORS as exc:
+        raise RuntimeError("provider unreachable (%s: %s)" % (type(exc).__name__, exc))
 
     candidates = payload.get("candidates") or []
     if not candidates:
