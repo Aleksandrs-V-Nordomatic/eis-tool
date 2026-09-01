@@ -274,7 +274,7 @@ JSON — see `cpv_policy.example.json` for the shape, which is a deliberately un
 illustration — so this repository names no industry, no trade and no target. Unset, nothing
 is filtered and every discovered notice is fetched. The gate is in its own file because it is
 the one piece of judgement that is not about a country: every country tool runs this exact
-rule, and Lithuania's used to reach into `batch.py` to borrow it.
+rule, and it is written where it belongs rather than reached for out of a shard driver.
 
 ## Four properties worth knowing before changing anything
 

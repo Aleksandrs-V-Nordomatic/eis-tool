@@ -3,10 +3,9 @@
 """The recall gate: which notices are worth fetching, before a single byte moves.
 
 WHY IT IS ITS OWN FILE. This is the one piece of judgement that is not about a country. A
-CPV code means the same thing in Riga and in Vilnius, and the terms a caller recalls on are
-their business rather than a portal's — so both country tools ran the identical rule, and
-the Lithuanian one reached into `batch.py`, the Latvian shard driver, to borrow it. That
-import was the only thing keeping the two countries in one repository.
+CPV code means the same thing wherever it is filed, and the terms a caller recalls on are
+their business rather than a portal's — so the rule is written once, in a file that names no
+portal, rather than reached for from whichever driver happens to need it.
 
 WHAT THIS KNOWS ABOUT THE CALLER'S INTEREST: NOTHING — the same rule deliver_graph.py keeps
 about its destination. The terms arrive in the environment, so this file names no industry,

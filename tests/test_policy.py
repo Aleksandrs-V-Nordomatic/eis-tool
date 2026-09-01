@@ -2,10 +2,9 @@
 # -*- coding: utf-8 -*-
 """The recall gate, which is the same rule in every country.
 
-It used to live in `batch.py` and be tested there, which made it look Latvian. It is not:
-the terms come from the caller's environment, CPV is European, and the Lithuanian lane ran
-the identical function by importing the Latvian shard driver to reach it. These tests moved
-with the code, so both country tools carry the gate and the proof of it.
+It used to live in `batch.py` and be tested there, which made it look like a property of
+this portal. It is not: the terms come from the caller's environment and CPV is European.
+These tests moved with the code, so the gate and the proof of it stay together.
 
 The fixture is deliberately unrelated to anything anyone hunts for — the repository must
 disclose the SHAPE of the filter and never its subject.
