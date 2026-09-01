@@ -83,13 +83,12 @@ class TheGateRefusesBeforeAnythingIsFetched(unittest.TestCase):
         self.assertEqual(code, 0)
 
     def test_a_country_this_repository_does_not_fetch_is_refused(self):
-        # The likeliest wrong input by far: a dispatch copied from another country's tool.
-        code, err = run_gate("LT")
+        # The likeliest wrong input by far: a dispatch copied from somewhere else. The
+        # refusal has to name the country this repository does fetch, or the person reading
+        # the failed run learns only that something was wrong with the input.
+        code, err = run_gate("EE")
         self.assertEqual(code, 1)
         self.assertIn("Latvia", err)
-
-    def test_a_country_with_no_source_is_refused(self):
-        self.assertEqual(run_gate("EE")[0], 1)
 
     def test_no_country_at_all_is_refused(self):
         self.assertEqual(run_gate(None)[0], 1)
