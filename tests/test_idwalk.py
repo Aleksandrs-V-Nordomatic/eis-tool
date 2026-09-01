@@ -138,6 +138,48 @@ class WhatTheRunWrites(unittest.TestCase):
         self.assertIn(eis_page.PAGE % 501, body)
 
 
+class TheCapReachesTheFetchAndTheCollector(unittest.TestCase):
+    """Both halves of the handover, pinned.
+
+    A live run found them missing. `--out` still wrote every find, so the cap capped
+    nothing and one night handed the fetch ten days of work; and the report omitted what
+    was handed, so the queue never drained and every id would have been handed again the
+    next night for ever. Neither failure raised anything: the run was green both times.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="idwalk_cap_")
+        self.addCleanup(__import__("shutil").rmtree, self.dir, True)
+        self.state = os.path.join(self.dir, "idspace.json")
+        with open(self.state, "w", encoding="utf-8") as fh:
+            json.dump({"schema": idspace.SCHEMA, "frontier": 500, "live": [500],
+                       "blank": {}, "pending": []}, fh)
+        original, idwalk.probe = idwalk.probe, lambda pid, pause: (idwalk.PUBLISHED, None)
+        self.addCleanup(setattr, idwalk, "probe", original)
+
+    def run_walk(self, hand):
+        out = os.path.join(self.dir, "targets.txt")
+        report = os.path.join(self.dir, "idprobe.json")
+        idwalk.main(["--state", self.state, "--budget", "20", "--width", "40",
+                     "--hand", str(hand), "--pause", "0", "--out", out, "--report", report])
+        with open(out, encoding="utf-8") as fh:
+            targets = [line for line in fh.read().splitlines() if line.strip()]
+        with open(report, encoding="utf-8") as fh:
+            return targets, json.load(fh)
+
+    def test_the_fetch_is_given_the_cap_and_not_every_find(self):
+        targets, report = self.run_walk(hand=3)
+        self.assertEqual(len(targets), 3, "every find reached the fetch — the cap did nothing")
+        self.assertGreater(len(report["probes"]), 3, "and there were more finds than that")
+
+    def test_the_report_says_what_was_handed_over(self):
+        targets, report = self.run_walk(hand=3)
+        self.assertIn("handed", report, "the collector cannot drain a queue it is not told about")
+        self.assertEqual(len(report["handed"]), 3)
+        self.assertEqual(sorted(idwalk.eis_page.PAGE % pid for pid in report["handed"]),
+                         sorted(targets), "the report and the fetch must name the same ids")
+
+
 class BeforeThereIsAFrontier(unittest.TestCase):
 
     def test_the_first_night_asks_nothing_and_says_so(self):

@@ -170,13 +170,17 @@ def main(argv=None):
 
     if args.out:
         with open(args.out, "a", encoding="utf-8") as fh:
-            for pid in found:
+            for pid in handed:
                 fh.write(eis_page.PAGE % pid + "\n")
     if args.report:
         with open(args.report, "w", encoding="utf-8") as fh:
             json.dump({"schema": "idprobe/1", "shard": args.shard, "of": args.of,
                        "frontier": state.get("frontier"), "planned": len(planned),
                        "probes": {str(pid): published for pid, published in probes.items()},
+                       # WHAT ACTUALLY REACHED THE FETCH, and the only thing that takes an
+                       # id off the queue. Leave it out and every id handed over is handed
+                       # over again the next night, for ever.
+                       "handed": handed,
                        "unreachable": unanswered, "stopped": stopped}, fh,
                       ensure_ascii=False)
     for pid in handed:
