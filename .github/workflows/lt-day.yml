@@ -81,7 +81,7 @@ jobs:
           echo "the day is $DAY"
 
       # THE GATE IS CHECKED BEFORE THE PORTAL IS TOUCHED, AND THIS STEP IS WHY IT IS A STEP.
-      # `batch.load_policy` fails open on purpose — an unreadable policy returns None rather
+      # `policy.load_policy` fails open on purpose — an unreadable policy returns None rather
       # than dropping every procurement, which is the right call inside a library. For an
       # unattended night it is the wrong outcome: no gate means fetching every archive the
       # window holds, roughly 119 of them, from a state portal, because a secret was
@@ -103,8 +103,8 @@ jobs:
           printf '%s' "$LT_POLICY" > policy.json
           echo "policy: from the repository secret"
           python3 -c "
-          import sys, batch
-          rules = batch.load_policy('policy.json')
+          import sys, policy
+          rules = policy.load_policy('policy.json')
           if rules is None:
               sys.exit('the recall policy did not parse — refusing to fetch the whole day ungated')
           # READ BY POSITION, NEVER UNPACKED. This line used to be a four-way unpack, and on

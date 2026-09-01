@@ -33,9 +33,9 @@ import net
 import lt_page
 
 try:
-    import batch as batch_mod
+    import policy as policy_mod
 except Exception:
-    batch_mod = None
+    policy_mod = None
 
 REGISTER = lt_page.BASE + "/app/viewPublication.do"
 PLAN = lt_page.BASE + "/app/downloadPlanFile.do?submissionId=%s"
@@ -147,7 +147,7 @@ def as_line(row, head, buyer, submission_id):
 
 def harvest(out_root, policy=None, limit=None, previous=None):
     """The whole register into `plans/`, gated, with only the amended buyers re-read."""
-    rules = batch_mod.load_policy(policy) if batch_mod is not None else None
+    rules = policy_mod.load_policy(policy) if policy_mod is not None else None
     seen = previous or {}
     published = register()
     if limit:
@@ -184,7 +184,7 @@ def harvest(out_root, policy=None, limit=None, previous=None):
         seen[sid] = entry["submitted"]
         for row in table:
             line = as_line(row, head, entry["buyer"], sid)
-            if rules is not None and batch_mod.outside_scope(line, rules):
+            if rules is not None and policy_mod.outside_scope(line, rules):
                 skipped += 1
                 continue
             kept.append(line)

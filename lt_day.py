@@ -37,9 +37,9 @@ except Exception:
     changes_mod = None
 
 try:
-    import batch as batch_mod
+    import policy as policy_mod
 except Exception:
-    batch_mod = None
+    policy_mod = None
 
 
 def _read(path):
@@ -112,9 +112,9 @@ def run(date, out_root, limit=None, keep=None, run_id=None, policy=None, watch=N
 
     # THE GATE FIRES BEFORE A BYTE MOVES. A card costs about 30 KB and an archive costs
     # megabytes, so the day reads every card, decides, and only then asks for the tenders
-    # that survived. It is `batch.outside_scope` unchanged — CPV is European and the policy
+    # that survived. It is `policy.outside_scope` unchanged — CPV is European and the policy
     # is a file, so the gate never needed a country of its own.
-    rules = batch_mod.load_policy(policy) if batch_mod is not None else None
+    rules = policy_mod.load_policy(policy) if policy_mod is not None else None
 
     moves, delivered, failed, gated = [], [], [], []
 
@@ -157,12 +157,12 @@ def run(date, out_root, limit=None, keep=None, run_id=None, policy=None, watch=N
                 failed.append({"pid": pid, "kind": target["kind"],
                                "reason": "not published, or EPPS answered with a login form"})
                 continue
-            if batch_mod.outside_scope(notice, rules):
+            if policy_mod.outside_scope(notice, rules):
                 # Named, never merely dropped. A tender nobody fetched and nobody mentioned
                 # reads exactly like a tender that does not exist.
                 gated.append({"pid": pid, "kind": target["kind"], "title": target["title"],
                               "buyer": target["buyer"],
-                              "cpv": batch_mod.cpv_codes(notice)})
+                              "cpv": policy_mod.cpv_codes(notice)})
                 continue
 
         try:

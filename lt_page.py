@@ -280,7 +280,7 @@ def parse_notice(page, pid, kind="tender"):
         "plan_ref": field(fields, "plan_ref"),
         "cpv_main": cpv[0] if cpv else None,
         "cpv_additional": cpv[1:],
-        # `batch.cpv_codes` looks under `cpv` for the whole set. Named here so the gate that
+        # `policy.cpv_codes` looks under `cpv` for the whole set. Named here so the gate that
         # already works for Latvia works unchanged, rather than growing a country branch.
         "cpv": cpv,
         "fields": fields,

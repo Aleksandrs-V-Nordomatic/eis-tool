@@ -53,7 +53,7 @@ class Stubs(object):
         case.addCleanup(setattr, lt_day, "lt_targets", lt_day.lt_targets)
         case.addCleanup(setattr, lt_day, "lt_page", lt_day.lt_page)
         case.addCleanup(setattr, lt_day, "lt_fetch", lt_day.lt_fetch)
-        case.addCleanup(setattr, lt_day, "batch_mod", lt_day.batch_mod)
+        case.addCleanup(setattr, lt_day, "policy_mod", lt_day.policy_mod)
 
         outer = self
 
@@ -75,7 +75,7 @@ class Stubs(object):
                 outer.fetched.append(str(pid))
                 return fetched(str(pid), kind)
 
-        class Batch(object):
+        class Gate(object):
             @staticmethod
             def load_policy(source):
                 return ("valdym",), (), (), ()
@@ -91,7 +91,7 @@ class Stubs(object):
         lt_day.lt_targets = Targets
         lt_day.lt_page = Page
         lt_day.lt_fetch = Fetch
-        lt_day.batch_mod = Batch
+        lt_day.policy_mod = Gate
 
 
 class TheWatchListRidesWithTheWindow(unittest.TestCase):

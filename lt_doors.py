@@ -32,9 +32,9 @@ import lt_page
 import lt_targets
 
 try:
-    import batch as batch_mod
+    import policy as policy_mod
 except Exception:
-    batch_mod = None
+    policy_mod = None
 
 KINDS = {"dps": (lt_targets.DPS, "Dinaminė pirkimo sistema"),
          "kvs": (lt_targets.QS, "Kvalifikacijos reikalavimų sistema")}
@@ -53,7 +53,7 @@ def enumerate_doors(which, session=None):
 
 
 def harvest(out_root, policy=None, kinds=("dps", "kvs"), limit=None):
-    rules = batch_mod.load_policy(policy) if batch_mod is not None else None
+    rules = policy_mod.load_policy(policy) if policy_mod is not None else None
     session = lt_targets.Session()
     base = os.path.join(out_root, "doors")
     os.makedirs(base, exist_ok=True)
@@ -71,7 +71,7 @@ def harvest(out_root, policy=None, kinds=("dps", "kvs"), limit=None):
             # notice with no codes the right way — the code veto needs codes to apply, and
             # the recall test does not — so this is the same gate, given less to work with.
             candidate = {"title": row["title"], "cpv": []}
-            if rules is not None and batch_mod.outside_scope(candidate, rules):
+            if rules is not None and policy_mod.outside_scope(candidate, rules):
                 continue
             matched += 1
             kept.append({

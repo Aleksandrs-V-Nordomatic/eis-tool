@@ -9,7 +9,7 @@ and the reason nobody looked is that the failure was in the step whose entire jo
 stop a bad night — a guard that is itself unguarded.
 
 The test extracts the real script out of the real workflow and executes it. It fails if the
-step stops surviving a policy field that `batch.load_policy` is willing to return.
+step stops surviving a policy field that `policy.load_policy` is willing to return.
 """
 import json
 import os
