@@ -7,6 +7,10 @@ that country's folder, and the two must never come apart — a run reading Lithu
 writing under `work/LV/` is a failure that succeeds: the upload returns 200, the index is
 valid, and a Latvian reader is handed Lithuanian tenders with nothing anywhere saying so.
 
+This repository is the Latvian tool and reads EIS only. The check below still runs, and
+still refuses, because a country tool that assumes its own country is a country tool that
+cannot say when it was pointed at the wrong drive.
+
 So the country is resolved once, here, and both the source and the destination are derived
 from it rather than configured beside it. Configuring them separately is what makes the
 mismatch expressible in the first place.
@@ -25,13 +29,20 @@ never quietly served by the other country's reader.
 
 import re
 
-# Every country this tool can fetch, and the module that reads its portal. Adding one is an
-# entry here plus its two modules; nothing else in the tool learns a country name.
+# The country this repository fetches, and the modules that read its portal.
+#
+# ONE COUNTRY PER REPOSITORY, AND THE TABLE STAYS. It would be shorter to delete this file
+# in a single-country tool and hard-code LV, and that is exactly what must not happen: the
+# table is what makes `resolve` able to REFUSE. A run that names no country, or names the
+# wrong one, stops here with a sentence instead of quietly fetching Latvia and filing it
+# under somebody else's folder. That guard is worth more than the line it costs.
+#
+# Making the next country's tool: fork this repository, replace the entry below and the two
+# modules it names, and change the name and the README. Nothing else in the tool learns a
+# country name, so nothing else has to be found and edited. `epps-tool` is Lithuania's.
 SOURCES = {
     "LV": {"page": "eis_page", "fetch": "eis_fetch",
            "portal": "EIS", "timezone": "Europe/Riga"},
-    "LT": {"page": "lt_page", "fetch": "lt_fetch",
-           "portal": "EPPS", "timezone": "Europe/Vilnius"},
 }
 
 CODE = re.compile(r"^[A-Z]{2}$")
@@ -44,9 +55,9 @@ class Mismatch(ValueError):
 def resolve(explicit=None, environ=None):
     """The run's country, from the flag or from `EIS_COUNTRY`. Never a default.
 
-    There is deliberately no fallback to Latvia. A default would mean the first Lithuanian
-    run launched without the flag would fetch Latvia and say nothing about it, and the way
-    that surfaces is a morning of the wrong country's cards.
+    There is deliberately no fallback, not even to this repository's one country. A default
+    would mean a run launched without the flag publishes under whichever folder the tool
+    guessed, and the way that surfaces is a morning of the wrong country's cards.
     """
     environ = {} if environ is None else environ
     code = (explicit or environ.get("EIS_COUNTRY") or "").strip().upper()
@@ -103,7 +114,7 @@ def parser_files(code):
     spelling of a label, a field that used to come back null — is not reported as an
     amendment on every procurement in the corpus. That only works if the version follows
     the reader the run actually used: stamping Latvia's digest onto a Lithuanian
-    fingerprint makes an `lt_page` edit invisible and an `eis_page` edit a false alarm, in
+    fingerprint makes an `eis_page` edit invisible and another country's a false alarm, in
     the same run and for the same reason.
     """
     return (SOURCES[resolve(code)]["page"] + ".py",)

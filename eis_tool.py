@@ -24,10 +24,20 @@ procurement.
 It asks about all three hosts, not one. A run reaches the register twice — the search API,
 then one notice page per hit — before it ever addresses EIS, and a gate that consulted only
 EIS passed runners whose very first request was then refused by a host nobody had asked.
+
+WHERE THE DAY IS. Not here. A Latvian day is four runners drawing four addresses at a portal
+that refuses about a third of them, so it is `batch.py` under `eis-batch.yml`, with
+`collect_day.py` reconciling the shard indexes afterwards. This file is the single tender
+and the pieces a day is made of.
+
+ONE COUNTRY PER REPOSITORY. This is the Latvian tool; `epps-tool` is Lithuania's. The two
+share everything after the read — the pack, the digests, the index, the change comparison,
+the recall gate, the retry policy — and the shape a reader sees is identical, which is what
+lets each portal have its own repository without a consumer learning a second layout.
+`--country LV` is still not optional and still has no default: see country.py.
 """
 
 import argparse
-import country
 import json
 import os
 import re
@@ -44,7 +54,15 @@ UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12
 
 
 def _reach(url, timeout=40):
-    """(reachable, detail) for one host. One request, no downloads."""
+    """(reachable, detail) for one host. One request, no downloads.
+
+    REACHABILITY, NOT HEALTH, AND THE DIFFERENCE MATTERS. The question is whether EIS and
+    the register will open a TCP connection to the address this runner drew — they refuse
+    some outright, at the transport layer, before any HTTP happens. So any status line at
+    all is a pass, including the 406, 500 and 404 these three endpoints answer a bare probe
+    with. Reading a status code here instead would turn a reachable host into a stand-down
+    and spend a draw on nothing.
+    """
     try:
         done = subprocess.run(
             ["curl", "-s", "-o", os.devnull, "--connect-timeout", "20",
@@ -56,7 +74,7 @@ def _reach(url, timeout=40):
     code = (done.stdout or b"").decode("utf-8", "replace").strip()
     if code in ("", "000"):
         return False, "no TCP connection — this address is refused"
-    return True, "answered %s" % code
+    return True, "reachable (HTTP %s)" % code
 
 
 # Every host a discovery run opens, in the order it opens them. The first two are the
@@ -282,30 +300,6 @@ def read_scans(pack, model=None, limit=None, provider=None):
     return 0
 
 
-def read_targets(source):
-    """Ids from a file or from the argument itself, in the order they were given.
-
-    Both spellings because both callers are real: a workflow writes its multi-line input to
-    a file, and a person on a terminal types two ids separated by a comma. Deduplicated
-    while keeping order, because a list naming the same procurement twice would fetch it
-    twice and count the day wrong.
-    """
-    if not source:
-        return []
-    raw = source
-    if os.path.exists(source):
-        with open(source, encoding="utf-8") as fh:
-            raw = fh.read()
-    out, seen = [], set()
-    for token in re.split(r"[\s,]+", raw.strip()):
-        # `EPPS:9320336` is how the board spells a key; the id is what the portal answers to.
-        token = token.split(":")[-1].strip()
-        if token and token not in seen:
-            seen.add(token)
-            out.append(token)
-    return out
-
-
 def main(argv=None):
     utf8_streams()
 
@@ -338,102 +332,9 @@ def main(argv=None):
     p.add_argument("--pack", required=True)
     p.add_argument("--with-images", action="store_true")
 
-    # ONE COMMAND, EITHER COUNTRY. The orchestrators differ because the portals do — EIS
-    # needs shards because it refuses a third of the addresses that ask, and EPPS refuses
-    # none — but a caller should not have to know that. It names a country and a date; the
-    # country picks the road, and the delivery shape either road produces is the same.
-    p = sub.add_parser("day", help="fetch one country's published day into the delivery shape")
-    p.add_argument("date", help="YYYY-MM-DD")
-    p.add_argument("--out", default="work")
-    p.add_argument("--limit", type=int, default=None, help="stop after this many, for a trial")
-    p.add_argument("--policy", default=None,
-                   help="recall policy: JSON, a path to one, or EIS_POLICY from the "
-                        "environment. Absent means fetch everything.")
-    # THE WATCH LIST TRAVELS WITH THE WINDOW, never in a run of its own. Two runs are two
-    # draws at one portal for one date, and two answers about what that date contained.
-    # These are ids somebody is still deciding about, so the recall gate does not apply:
-    # it decides what is worth fetching for the FIRST time, and these already have a card.
-    p.add_argument("--targets", default=None,
-                   help="ids to re-read whatever the gate would say — a file of them, one "
-                        "per line, or the ids themselves separated by commas or spaces")
-    country.add_argument(p)
-
-    # The two standing populations. Neither is a day and neither is a tender: a plan says
-    # what a buyer intends to buy months ahead, and a door is a system to qualify into
-    # rather than a competition to enter. Both are read as a stock, on demand.
-    for name, help_text in (("plans", "the annual procurement plans buyers have published"),
-                            ("doors", "dynamic purchasing and qualification systems")):
-        p = sub.add_parser(name, help=help_text)
-        p.add_argument("--out", default="work")
-        p.add_argument("--policy", default=None)
-        p.add_argument("--limit", type=int, default=None)
-        country.add_argument(p)
 
     args = ap.parse_args(argv)
 
-    if args.command in ("plans", "doors"):
-        try:
-            code = country.resolve(args.country, os.environ)
-        except country.Mismatch as exc:
-            print("%s: %s" % (args.command, exc), file=sys.stderr)
-            return 2
-        if code != "LT":
-            # Said plainly rather than answered with an empty list: Latvia publishes no
-            # plan register and no dynamic purchasing systems through EIS, and a reader
-            # handed nothing cannot tell "none" from "not asked".
-            print("%s: %s has no %s register" % (args.command, code, args.command),
-                  file=sys.stderr)
-            return 2
-        out = os.path.join(args.out, code)
-        if args.command == "plans":
-            import lt_plans
-            prior = os.path.join(out, "plans", "index.json")
-            seen = {}
-            if os.path.exists(prior):
-                with open(prior, encoding="utf-8") as fh:
-                    seen = json.load(fh).get("seen") or {}
-            index, _ = lt_plans.harvest(out, args.policy, args.limit, seen)
-            print("plans: %d published, %d read, %d unchanged, %d line(s), %d gated"
-                  % (index["published_plans"], index["buyers_read"],
-                     index["buyers_unchanged"], index["lines_kept"], index["lines_gated"]))
-        else:
-            import lt_doors
-            index, _ = lt_doors.harvest(out, args.policy, limit=args.limit)
-            for which, c in sorted(index["counts"].items()):
-                print("%s: %d open, %d ours" % (which.upper(), c.get("open", 0),
-                                                c.get("ours", 0)))
-        return 0
-
-    if args.command == "day":
-        try:
-            code = country.resolve(args.country, os.environ)
-        except country.Mismatch as exc:
-            # A stack trace here would be the tool blaming the caller for a question it
-            # simply has to be asked.
-            print("day: %s" % exc, file=sys.stderr)
-            return 2
-        # The destination carries the country for the same reason the source does: one run
-        # is one country, and neither half is configured where the other cannot see it.
-        out = os.path.join(args.out, code)
-        if code == "LT":
-            import lt_day
-            day, _ = lt_day.run(args.date, out, args.limit, policy=args.policy,
-                                watch=read_targets(args.targets))
-        else:
-            print("day: %s has no day runner yet — use batch.py for Latvia" % code,
-                  file=sys.stderr)
-            return 2
-        print("%s %s: %d/%d delivered, %d document(s) -> %s"
-              % (code, day["date"], day["coverage"]["delivered"],
-                 day["coverage"]["targets"], day["counts"]["documents"], out))
-        # NAMED, NOT COUNTED. "5 of 41" is also what a heavily gated day looks like, so a
-        # short day that only reported a number would be indistinguishable from a normal
-        # one. The exit code says the day is short; these lines say which procurements and
-        # why, which is the part a person can act on.
-        for row in day.get("lost", []):
-            print("  lost %s (%s): %s" % (row.get("pid"), row.get("kind") or "?",
-                                          row.get("reason")), file=sys.stderr)
-        return 0 if day["complete"] else 1
 
     if args.command == "probe":
         reachable, detail = probe()

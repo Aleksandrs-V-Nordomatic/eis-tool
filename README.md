@@ -80,112 +80,61 @@ The directory is named `llm/` for a lane that has not been model-first since Tes
 became its default. Renaming it would move paths the manifest already hands out, so the
 name stays and this note carries the correction.
 
-## Which country, and where it lands
+## One country, one repository
 
-One run is one country. Latvia is read from EIS and Lithuania from EPPS, and the two
-portals have almost nothing in common underneath — EIS is a bespoke ASP.NET application
-serving embedded JavaScript arrays, EPPS a European Dynamics Java application serving a
-definition list. What they do have in common is everything after the read: the pack, the
-digests, the index, the change comparison and the delivery are the same code for both.
+This is the Latvian tool. Its sibling, `epps-tool`, is the Lithuanian one, and there is one
+repository per country on purpose rather than one tool with a switch.
 
-    python3 eis_tool.py day 2026-08-20 --country LT --out work
+The two portals have almost nothing in common underneath — EIS is a bespoke ASP.NET
+application serving embedded JavaScript arrays behind a portal that refuses a third of the
+cloud address space, EPPS a European Dynamics Java application serving a definition list and
+one archive per tender, and it refuses nobody. What they *do* have in common is everything
+after the read: the pack, the digests, the index, the change comparison and the delivery are
+the same design, and the shape a reader sees is identical.
 
-The country is named once and both halves follow from it. It picks the reader — `eis_page`
-or `lt_page`, refused rather than guessed for a code with neither — and it picks the folder
-published to, which is the country's own under the runtime root:
+That shape is the contract between the tools, and it is what makes the split cost nothing: a
+consumer that knows one country's layout knows every country's.
+
+**Adding a country is a fork of this repository.** Replace the entry in `country.py` and the
+two modules it names, change the name and this file, and nothing else has to be found. The
+one thing that must not change is the guard.
+
+### The guard, which is why country.py is not deleted in a one-country tool
+
+    python3 batch.py --days 1 --out packs          # the Latvian day
+    python3 deliver_graph.py --packs packs --shard 1 --date 2026-08-20 --country LV
+
+`--country` has no default and never gains one. It picks the reader — refused rather than
+guessed for a code this repository has no source for — and it picks the folder published to,
+which is the country's own under the runtime root:
 
 ```
 work/LV/  <date>/{day.json,changes.json}   tenders/<pid>/…
-work/LT/  <date>/{day.json,changes.json}   tenders/<pid>/…
-          plans/{index.json,lines.jsonl}   doors/{index.json,doors.jsonl}
 ```
 
-Lithuania publishes three populations where Latvia publishes one, and only the first is a
-day. `day` takes the window — tenders and market consultations together, told apart by
-procedure. `plans` reads the annual procurement plans buyers file months ahead. `doors`
-lists the dynamic purchasing and qualification systems, which are applications rather than
-bids. The last two are a stock read on demand, not a stream: a system announced once is no
-more interesting on the day it appeared than on any day after.
-
-    python3 eis_tool.py plans  --country LT --policy rules.json
-    python3 eis_tool.py doors  --country LT --policy rules.json
-
 **`GRAPH_DEST_ROOT` names the folder that CONTAINS the country folders, not one of them.**
-The code is appended by the tool. Configuring the full path instead would put the country
-in two places that can disagree, and the way that disagreement surfaces is a day of one
+The code is appended by the tool. Configuring the full path instead would put the country in
+two places that can disagree, and the way that disagreement surfaces is a day of one
 country's tenders sitting in the other's folder — uploaded cleanly, indexed validly, with
 nothing anywhere saying so. A root already ending in a country code is refused, because
-`work/LV/LV` is the same mistake wearing a different hat. There is no default country for
-the same reason: a default would send the first Lithuanian run at Latvia in silence.
+`work/LV/LV` is the same mistake wearing a different hat, and so is a root copied across from
+the Lithuanian deployment that still ends in `/LT`.
 
-**Lithuania needs no shards.** A shard exists so four runners can draw four addresses at a
-portal that refuses a third of them. EPPS refuses none and serves each tender as one
-archive, so its day is written directly rather than reconciled from shard indexes — the
-same two files, arrived at without the machinery that Latvia cannot do without.
+Lithuania is now simply a code this tool has no source for, so `--country LT` is stopped by
+the same line that stops `EE`. That is the guarantee the split has to provide: the Latvian
+tool cannot be pointed at Lithuania's portal, and it cannot be pointed at Lithuania's folder.
 
-### Each country has its own lane all the way to the drive
+### Where the day is
 
-    eis-batch.yml → batch.py       → deliver_graph.py     Latvia, four shards
-    lt-day.yml    → eis_tool.py day → deliver_lt.py       Lithuania, one pass
+`eis_tool.py` is the single tender and the pieces a day is made of — `probe`, `resolve`,
+`discover`, `fetch`, `run`, `extract`. The day itself is not one of them, because a Latvian
+day is four runners drawing four addresses at a portal that refuses about a third of them:
 
-They are separate because the delivery is, and the delivery is separate for reasons that
-were each found by asking what the Latvian one would do to a Lithuanian tender:
+    eis-batch.yml → eis-shard-chain.yml → eis-shard.yml → batch.py → deliver_graph.py
+                  → collect_day.py
 
-- `deliver_graph` **rebuilds** `index.json` from `procurement.json` and the normalized
-  manifest. Lithuania's index is not derivable from those — it carries the amendment
-  number that placed each document and the address a person clicks, both read off the EPPS
-  catalogue and both gone by the time `procurement.json` is written. `deliver_lt` ships the
-  index the fetch already wrote.
-- `deliver_graph.download_url` is a literal `https://www.eis.gov.lv/EKEIS/Document/…`.
-  Pointed at Lithuania it does not fail; it stamps a working Latvian URL shape onto a
-  Lithuanian procurement, and the card links to a document that is not the one it names.
-- A shard is in `deliver_graph`'s path, and Lithuania has no shards.
-
-**The change comparison happens at delivery, against the drive.** `lt_day` compares each
-procurement with `state.json` in its own home, which is right on a workstation that keeps
-`work/` and worthless on a runner, whose disk is new every night: every procurement would
-come back `new`, for ever, and `changes.json` would be a copy of the day. The drive is the
-only durable thing in the arrangement, so `deliver_lt` reads the stored state back out of
-it — exactly as `deliver_graph` already does — and rewrites the day's verdict before
-uploading it. `compared_against: "drive"` in the delivered `changes.json` says so.
-
-**The gate is required, not optional, in the scheduled lane.** `batch.load_policy` fails
-open by design: an unreadable policy returns `None` rather than dropping everything. Inside
-a library that is right; for an unattended night it would mean fetching every archive the
-window holds from a state portal because a secret was misspelt. `lt-day.yml` therefore
-checks that the policy parses before the portal is touched, and stops if it does not.
-
-**The gate has two ways in, and a code is one of them.** Recall used to be title-only: a CPV
-code could exclude a notice or rescue one from an exclusion, but it could never bring anything
-in, so the gate's whole sensitivity rested on a buyer choosing words we had guessed in advance.
-That holds up after a title list has been tuned against a live register for weeks and fails on a
-country whose roots were written in one sitting. Measured on the Lithuanian day of 24 August
-2026: `Stebejimo sistema` under 32323500, which is literally "video-surveillance system", and a
-LoRaWAN parameter-monitoring rollout under 32440000, telemetry — both squarely in scope, both
-dropped before a byte moved. `recall_cpv_prefixes` closes that. Exclusions still bind, so the
-clause can only widen what is fetched; absent, nothing changes.
-
-**An empty window is reported as broken, not as quiet.** Lithuania publishes on the order of a
-hundred resources a working day and thirteen on a Sunday; zero is not something EPPS does. What
-produces zero is the crawl breaking — the results table gaining a column, the displaytag page
-parameter changing under a redeploy — and each of those returns an empty list rather than an
-error. So `day.json` carries `discovery_failed` and refuses to call itself complete, because the
-alternative is a green run, a complete day, an empty morning, and nothing to tell it from a
-holiday.
-
-**A hole in the watch is not the day arriving short.** The day is the window; a watched card is a
-standing question asked of it. A watched resource no view will serve is counted in
-`coverage.watch_holes` and named in `lost`, and it leaves `complete` alone — otherwise every
-night would be incomplete until somebody edited the board, and a flag that is always on is one
-nobody reads on the night it starts meaning something.
-
-**And the policy comes from the secret or the run does not happen.** Both `*_policy.example.json`
-files in this repository are deliberately unrelated illustrations — office printing — so that a
-public repository discloses nothing about what any deployment actually hunts for. They exist to
-be copied into `EIS_POLICY` and `LT_POLICY` and to document the shape, never to be run against.
-A scheduled night with no secret therefore stops rather than falling back: run against the
-example it would fetch almost nothing, deliver a valid day and report success, and an empty
-morning reads exactly like a quiet one.
+`batch.py` fetches one shard's slice, `deliver_graph.py` delivers it, and `collect_day.py`
+reconciles the four shard indexes into the day's two files afterwards.
 
 ## What gets published
 
@@ -328,9 +277,13 @@ one: nothing here ever lists that folder, and every address a reader needs is ca
 explicitly as `home` in `day.json`, `changes.json` and each shard index. That is also what
 makes the layout changeable later without breaking a reader.
 
-Which notices are worth fetching is not decided here either. `EIS_POLICY`
-carries a caller's recall terms as JSON — see `cpv_policy.example.json` for the shape.
-Unset, nothing is filtered and every discovered notice is fetched.
+Which notices are worth fetching is not decided here either. `policy.py` holds the rule and
+nothing else: recall terms and CPV prefixes arrive from the environment in `EIS_POLICY` as
+JSON — see `cpv_policy.example.json` for the shape, which is a deliberately unrelated
+illustration — so this repository names no industry, no trade and no target. Unset, nothing
+is filtered and every discovered notice is fetched. The gate is in its own file because it is
+the one piece of judgement that is not about a country: every country tool runs this exact
+rule, and Lithuania's used to reach into `batch.py` to borrow it.
 
 ## Four properties worth knowing before changing anything
 
@@ -374,6 +327,25 @@ Each shard also publishes the whole day's target list. `collect_day` subtracts w
 delivered and what the shards reported as failed or withdrawn, and `coverage.unaccounted`
 names anything left — a tender whose owner never saw it. `complete` is false when that list
 is not empty.
+
+**One retry policy, and it lives in `net.py`.** Every request this tool makes goes through
+it: the honest exception set — `OSError` and `http.client.HTTPException`, because a reset
+arrives as `RemoteDisconnected` and that is neither a `URLError` nor a `TimeoutError` — a
+budget that outlasts a portal hiccup, `Retry-After`, and the parse inside the retry because a
+portal under load answers 200 with an error page. Call sites do not get a vote on it. A shard
+once died 0.8 seconds into a run holding a reset its own four-try loop had watched go past,
+because the loop named the wrong exception, and the same defect was sitting in four other
+places including the delivery that runs after a whole day of downloads. A rule that has to be
+re-derived at each call site is a rule that gets written wrong again.
+
+**Resolution is proven the way coverage is.** Coverage is checked against the register's own
+`x-total-count` before each notice is resolved to its EIS page, so a connection reset during
+resolution used to shrink the day with nothing downstream able to tell: `resolve` answered
+`None` both for "this purchase is conducted somewhere else" and for "we never reached the
+register", and discovery skips a notice with no link by design. The two are kept apart now.
+If nothing resolved at all the runner stands down for a fresh draw; if some did, the ones
+that did not are carried down by uuid and named in `failed.txt` if the fetch stage cannot
+reach them either.
 
 **The address lottery is real, and a failed fetch is never evidence about a tender.** EIS
 refuses part of the cloud address space at the TCP layer: runners dispatched in the same
