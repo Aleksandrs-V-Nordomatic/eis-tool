@@ -112,6 +112,8 @@ def main(argv=None):
                     help="how many ids ALL runners together may ask about tonight")
     ap.add_argument("--width", type=int, default=idspace.DEFAULT_WIDTH,
                     help="how far below the frontier the backfill reaches")
+    ap.add_argument("--hand", type=int, default=idspace.DEFAULT_HANDOVER,
+                    help="how many found ids ALL runners together may give the fetch tonight")
     ap.add_argument("--pause", type=float, default=1.0, help="seconds between pages")
     ap.add_argument("--state", help="read the state from this file instead of the drive")
     ap.add_argument("--out", help="write the published ids here, one per line, for batch.py")
@@ -146,7 +148,22 @@ def main(argv=None):
         if answer == PUBLISHED:
             found.append(pid)
 
+    # WHAT THE FETCH IS GIVEN IS CAPPED SEPARATELY FROM WHAT IS ASKED. Half the ids in an
+    # unwalked window are live, so a first walk finds them by the hundred and would hand a
+    # day's fetch ten days of work. The rest are not lost: they are owed, and the queue in
+    # the state drains at this rate every run.
+    #
+    # The cap is for all runners together, so each takes its share. It is sliced by the
+    # fetch's own rule, like the questions were, or a runner would hand over an id another
+    # runner has to fetch.
+    share = max(1, args.hand // max(args.of, 1))
+    handed = idspace.hand_over(state, found, limit=share,
+                               owner=lambda pid: batch.shard_of(eis_page.PAGE % pid, args.of),
+                               shard=args.shard)
+    owed = len(set(state.get("pending") or []) | set(found)) - len(handed)
+
     say("id walk: %d asked, %d published, %d unanswered" % (len(probes), len(found), unanswered))
+    say("id walk: %d handed to the fetch, %d owed and queued" % (len(handed), max(owed, 0)))
     if stopped:
         say("id walk: stopped early - %s; %d id(s) left for the next run"
             % (stopped, len(mine) - len(probes) - unanswered))
@@ -162,7 +179,7 @@ def main(argv=None):
                        "probes": {str(pid): published for pid, published in probes.items()},
                        "unreachable": unanswered, "stopped": stopped}, fh,
                       ensure_ascii=False)
-    for pid in found:
+    for pid in handed:
         print(eis_page.PAGE % pid)
     return 0
 

@@ -33,6 +33,11 @@ and the ones that turn out to be published join the same run's target list. It i
 sweep and will not become one — the id space is thousands wide and the portal is a public
 service.
 
+**What the walk finds is handed over at a steady rate.** The budget caps the questions; a
+separate cap limits what the answers cost, because half the ids in an unwalked window are
+live and a first walk would otherwise hand one day's fetch ten days of work. The surplus is
+not dropped — it is owed, queued in the same state, and drains a few a night.
+
 Which ids get asked about is `idspace.py`, and the answers are remembered at
 `<country>/idspace.json` beside the delivery, because a runner is new every night. Every
 shard reads that file and asks about its own slice; `collect_day.py` merges the slices and

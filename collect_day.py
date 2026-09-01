@@ -247,17 +247,21 @@ def idspace_after(drive, base, date, shards, day, tok):
     could reach is in no report at all: an unreachable page is not an answer, and recording
     it as "not published" would retire a live id for as long as the state remembers it.
     """
-    probes = {}
+    probes, handed = {}, []
     for n in range(1, shards + 1):
         report = json_at(drive, "%s/%s/shards/eis-batch-shard-%d/idprobe.json" % (base, date, n), tok)
         for pid, published in ((report or {}).get("probes") or {}).items():
             probes[pid] = bool(published)
+        # What actually reached the fetch. Only these come off the queue: an id found and not
+        # handed over is owed, and forgetting it here would make the handover cap a quiet way
+        # of losing tenders.
+        handed.extend((report or {}).get("handed") or [])
 
     delivered = [t.get("pid") for t in day.get("tenders") or [] if str(t.get("pid") or "").isdigit()]
     if not probes and not delivered:
         return None
     prior = json_at(drive, "%s/idspace.json" % base, tok)
-    return idspace.merge(prior, probes, date, discovered=delivered)
+    return idspace.merge(prior, probes, date, discovered=delivered, handed=handed)
 
 
 def main(argv=None):

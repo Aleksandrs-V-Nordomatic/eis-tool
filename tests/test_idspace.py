@@ -118,5 +118,51 @@ class WhatIsRemembered(unittest.TestCase):
         self.assertNotIn(old, after["blank"], "no longer askable, so no longer remembered")
 
 
+class TheQueue(unittest.TestCase):
+    """What the fetch is given is capped separately from what is asked.
+
+    Half the ids in an unwalked window are live, so a first walk finds them by the hundred.
+    Handing all of them to a fetch sized for a day would make the first night ten days long
+    and every night after it nearly empty — and dropping the surplus instead would make the
+    cap a quiet way of losing tenders. So they are owed.
+    """
+
+    def test_a_find_is_queued_as_well_as_remembered_live(self):
+        after = idspace.merge(idspace.empty(), {101: True, 102: False}, "2026-09-02")
+        self.assertEqual(after["live"], [101])
+        self.assertEqual(after["pending"], [101])
+
+    def test_the_queue_drains_only_by_what_was_handed_over(self):
+        after = idspace.merge(idspace.empty(), {101: True, 102: True}, "2026-09-02")
+        handed = idspace.hand_over(after, [101, 102], limit=1)
+        self.assertEqual(handed, [102], "newest first")
+        later = idspace.merge(after, {}, "2026-09-03", handed=handed)
+        self.assertEqual(later["pending"], [101], "the other one is still owed")
+        self.assertEqual(later["live"], [101, 102], "and both stay known live")
+
+    def test_the_queue_comes_before_tonights_finds(self):
+        state = idspace.load({"schema": idspace.SCHEMA, "frontier": 200, "live": [150],
+                              "pending": [150]})
+        self.assertEqual(idspace.hand_over(state, [199], limit=1), [150],
+                         "an id that waited a night has waited longer than one found a minute ago")
+
+    def test_the_cap_is_a_ceiling_and_zero_hands_over_nothing(self):
+        state = idspace.merge(idspace.empty(), {n: True for n in range(100, 110)}, "2026-09-02")
+        self.assertEqual(len(idspace.hand_over(state, [], limit=4)), 4)
+        self.assertEqual(idspace.hand_over(state, [], limit=0), [])
+
+    def test_a_runner_only_hands_over_what_it_would_fetch(self):
+        state = idspace.merge(idspace.empty(), {n: True for n in range(100, 140)}, "2026-09-02")
+        handed = idspace.hand_over(state, [], limit=50, owner=lambda pid: pid % 4 + 1, shard=3)
+        self.assertTrue(handed)
+        self.assertTrue(all(pid % 4 + 1 == 3 for pid in handed))
+
+    def test_what_the_register_delivered_is_not_owed(self):
+        """It is arriving through the ordinary road; queueing it would fetch it twice."""
+        after = idspace.merge(idspace.empty(), {101: True}, "2026-09-02")
+        later = idspace.merge(after, {}, "2026-09-03", discovered=["101"])
+        self.assertEqual(later["pending"], [])
+
+
 if __name__ == "__main__":
     unittest.main()
