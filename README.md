@@ -294,12 +294,21 @@ industry, no trade and no target. Unset, nothing is filtered and every discovere
 fetched.
 
 It arrives by one of two roads. `EIS_POLICY` carries the JSON, or a path to it, in the
-environment. Or `POLICY_SOURCE` and `POLICY_TOKEN` name a URL and a credential, and the
-workflow fetches the file to the runner before the day starts — which is the road for a
-caller who would rather author the classification where the scope it serves is authored, and
-review a change to it, than keep it in a secret nobody can read back. **Configured and
-unreachable stops the run**: an absent policy meaning "fetch everything" is the right
-direction when no filter was asked for and the wrong one when a token has expired. The gate is in its own file because it is
+environment. Or `POLICY_REMOTE` and `POLICY_FILE` name a git remote and a path inside it, and
+the workflow fetches that one file to the runner before the day starts — which is the road
+for a caller who would rather author the classification where the scope it serves is
+authored, and review a change to it, than keep it in a secret nobody can read back.
+
+**Over git, on purpose.** `POLICY_REMOTE` is meant to carry a read-only deploy credential for
+one repository: it can read that repository and nothing else — no other project, no API, no
+writes. Fetching over an API instead would need a credential scoped to a whole account, which
+is a great deal of authority for one small file. The clone is shallow, blobless and sparse,
+and it is deleted as soon as the file is copied out, because its config is where the
+credential would otherwise sit for the rest of the job.
+
+**Configured and unreachable stops the run**: an absent policy meaning "fetch everything" is
+the right direction when no filter was asked for and the wrong one when a credential has
+expired. The gate is in its own file because it is
 the one piece of judgement that is not about a country: every country tool runs this exact
 rule, and it is written where it belongs rather than reached for out of a shard driver.
 

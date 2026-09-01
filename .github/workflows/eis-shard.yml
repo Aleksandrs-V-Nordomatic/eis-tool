@@ -116,25 +116,46 @@ jobs:
       # the one rule that decides what the whole pipeline never sees. It is authored where the
       # scope it serves is authored, and fetched here at run time.
       #
-      # This repository still learns nothing: the address and the credential are both secrets, and
-      # the file lands on the runner and nowhere else.
+      # This repository still learns nothing: the remote and the file are both secrets, and the
+      # file lands on the runner and nowhere else.
+      #
+      # IT IS FETCHED OVER GIT, AND THAT IS THE WHOLE POINT OF THE CREDENTIAL. A read-only
+      # deploy token reaches exactly one repository and nothing else — it cannot read another
+      # project, cannot call the API, cannot write. A personal token would have been one line
+      # shorter here and would have handed this repository a key to everything its owner can
+      # read, which is not a trade a workflow gets to make on somebody's behalf.
+      #
+      # Shallow, blobless and sparse, so one small file does not drag a history onto the runner;
+      # and the clone is removed straight after, because its `.git/config` is where the
+      # credential would otherwise sit for the rest of the job.
       #
       # CONFIGURED AND UNREACHABLE IS A STOP, not a shrug. `policy.py` treats an absent policy as
       # "fetch everything", which is the right direction when no filter was asked for and the wrong
       # one when a token expired: it would turn a bad credential into a threefold day against a
       # state portal.
       - name: Read the recall policy from where it is authored
-        if: ${{ steps.go.outputs.go == 'yes' && env.HAVE_POLICY_SOURCE == 'true' }}
+        if: ${{ steps.go.outputs.go == 'yes' && env.HAVE_POLICY_REMOTE == 'true' }}
         env:
-          HAVE_POLICY_SOURCE: ${{ secrets.POLICY_SOURCE != '' }}
-          POLICY_SOURCE: ${{ secrets.POLICY_SOURCE }}
-          POLICY_TOKEN: ${{ secrets.POLICY_TOKEN }}
+          HAVE_POLICY_REMOTE: ${{ secrets.POLICY_REMOTE != '' }}
+          POLICY_REMOTE: ${{ secrets.POLICY_REMOTE }}
+          POLICY_FILE: ${{ secrets.POLICY_FILE }}
         run: |
-          if ! curl -fsS --max-time 60 --retry 3 --retry-delay 2                -H "PRIVATE-TOKEN: $POLICY_TOKEN"                -o recall_policy.json "$POLICY_SOURCE"; then
-            echo "the recall policy is configured and could not be fetched - standing down rather"                  "than fetching a whole day unfiltered" >&2
+          rm -rf policy-src
+          if ! git clone --quiet --depth 1 --filter=blob:none --sparse "$POLICY_REMOTE" policy-src; then
+            echo "the recall policy is configured and its repository could not be reached -" \
+                 "standing down rather than fetching a whole day unfiltered" >&2
             exit 1
           fi
-          python3 -c "import json,sys; json.load(open('recall_policy.json',encoding='utf-8'))"             || { echo "the recall policy is configured and did not parse" >&2; exit 1; }
+          git -C policy-src sparse-checkout set --no-cone "$POLICY_FILE" >/dev/null
+          if [ ! -s "policy-src/$POLICY_FILE" ]; then
+            echo "the recall policy is configured and its file is not in that repository" >&2
+            rm -rf policy-src
+            exit 1
+          fi
+          cp "policy-src/$POLICY_FILE" recall_policy.json
+          rm -rf policy-src
+          python3 -c "import json; json.load(open('recall_policy.json', encoding='utf-8'))" \
+            || { echo "the recall policy is configured and did not parse" >&2; exit 1; }
           echo "recall policy read, $(wc -c < recall_policy.json) bytes"
 
       # A FIFTH OF WHAT THE PLATFORM PUBLISHES CARRIES NO REGISTER NOTICE, so discovery
