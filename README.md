@@ -283,10 +283,18 @@ explicitly as `home` in `day.json`, `changes.json` and each shard index. That is
 makes the layout changeable later without breaking a reader.
 
 Which notices are worth fetching is not decided here either. `policy.py` holds the rule and
-nothing else: recall terms and CPV prefixes arrive from the environment in `EIS_POLICY` as
-JSON — see `cpv_policy.example.json` for the shape, which is a deliberately unrelated
-illustration — so this repository names no industry, no trade and no target. Unset, nothing
-is filtered and every discovered notice is fetched. The gate is in its own file because it is
+nothing else: recall terms and CPV prefixes arrive as JSON — see `cpv_policy.example.json`
+for the shape, which is a deliberately unrelated illustration — so this repository names no
+industry, no trade and no target. Unset, nothing is filtered and every discovered notice is
+fetched.
+
+It arrives by one of two roads. `EIS_POLICY` carries the JSON, or a path to it, in the
+environment. Or `POLICY_SOURCE` and `POLICY_TOKEN` name a URL and a credential, and the
+workflow fetches the file to the runner before the day starts — which is the road for a
+caller who would rather author the classification where the scope it serves is authored, and
+review a change to it, than keep it in a secret nobody can read back. **Configured and
+unreachable stops the run**: an absent policy meaning "fetch everything" is the right
+direction when no filter was asked for and the wrong one when a token has expired. The gate is in its own file because it is
 the one piece of judgement that is not about a country: every country tool runs this exact
 rule, and Lithuania's used to reach into `batch.py` to borrow it.
 

@@ -109,6 +109,34 @@ jobs:
         if: steps.go.outputs.go == 'yes'
         run: python3 -m unittest discover -s tests -t tests
 
+      # THE RECALL POLICY IS NOT A SECRET AND IS NOT THIS REPOSITORY'S.
+      #
+      # It is the caller's classification: which notices may be skipped before a byte moves. A
+      # secret was the wrong home for it — nobody can read a secret back, so nobody could review
+      # the one rule that decides what the whole pipeline never sees. It is authored where the
+      # scope it serves is authored, and fetched here at run time.
+      #
+      # This repository still learns nothing: the address and the credential are both secrets, and
+      # the file lands on the runner and nowhere else.
+      #
+      # CONFIGURED AND UNREACHABLE IS A STOP, not a shrug. `policy.py` treats an absent policy as
+      # "fetch everything", which is the right direction when no filter was asked for and the wrong
+      # one when a token expired: it would turn a bad credential into a threefold day against a
+      # state portal.
+      - name: Read the recall policy from where it is authored
+        if: ${{ steps.go.outputs.go == 'yes' && env.HAVE_POLICY_SOURCE == 'true' }}
+        env:
+          HAVE_POLICY_SOURCE: ${{ secrets.POLICY_SOURCE != '' }}
+          POLICY_SOURCE: ${{ secrets.POLICY_SOURCE }}
+          POLICY_TOKEN: ${{ secrets.POLICY_TOKEN }}
+        run: |
+          if ! curl -fsS --max-time 60 --retry 3 --retry-delay 2                -H "PRIVATE-TOKEN: $POLICY_TOKEN"                -o recall_policy.json "$POLICY_SOURCE"; then
+            echo "the recall policy is configured and could not be fetched - standing down rather"                  "than fetching a whole day unfiltered" >&2
+            exit 1
+          fi
+          python3 -c "import json,sys; json.load(open('recall_policy.json',encoding='utf-8'))"             || { echo "the recall policy is configured and did not parse" >&2; exit 1; }
+          echo "recall policy read, $(wc -c < recall_policy.json) bytes"
+
       # A FIFTH OF WHAT THE PLATFORM PUBLISHES CARRIES NO REGISTER NOTICE, so discovery
       # cannot see it however complete its coverage proof looks — unregulated procurements,
       # market consultations, and closed competitions inside a dynamic purchasing system.
@@ -143,9 +171,15 @@ jobs:
           # Which notices are worth fetching is the caller's business and never the
           # repository's. Unset means no filter, and a discovery run then fetches every
           # notice it finds — the safe direction, and a loud one.
+          #
+          # The step above may have put the policy on disk. The file wins where it exists, and
+          # this stays as the older road for a deployment that has not moved yet.
           EIS_POLICY: ${{ secrets.EIS_POLICY }}
         run: |
           mkdir -p packs
+          # `policy.py` takes JSON text or a path, so the file needs no flag of its own.
+          [ -s recall_policy.json ] && export EIS_POLICY=recall_policy.json
+
           cat > targets.txt <<'TARGETS'
           ${{ inputs.targets }}
           TARGETS
