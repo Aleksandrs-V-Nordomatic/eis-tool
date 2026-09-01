@@ -154,8 +154,22 @@ jobs:
           fi
           cp "policy-src/$POLICY_FILE" recall_policy.json
           rm -rf policy-src
-          python3 -c "import json; json.load(open('recall_policy.json', encoding='utf-8'))" \
-            || { echo "the recall policy is configured and did not parse" >&2; exit 1; }
+          # PARSING IS NOT ENOUGH. `policy.py` reads a policy with no rules in it as no policy,
+          # and no policy means fetch everything — the right answer when nobody asked for a
+          # filter and the wrong one when a file arrived truncated, emptied or renamed around.
+          # A configured policy that says nothing is the third state, and it stops the run.
+          python3 - <<'CHECK' || exit 1
+          import json, sys
+          try:
+              policy = json.load(open("recall_policy.json", encoding="utf-8"))
+          except ValueError as exc:
+              sys.exit("the recall policy is configured and did not parse: %s" % exc)
+          rules = ("recall_title_terms", "hard_exclude_prefixes", "hard_exclude_title_terms",
+                   "override_prefixes", "recall_cpv_prefixes")
+          if not any(policy.get(name) for name in rules):
+              sys.exit("the recall policy is configured and carries no rule - it would load as "
+                       "no filter at all, which is a whole day fetched unfiltered")
+          CHECK
           echo "recall policy read, $(wc -c < recall_policy.json) bytes"
 
       # A FIFTH OF WHAT THE PLATFORM PUBLISHES CARRIES NO REGISTER NOTICE, so discovery
