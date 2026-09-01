@@ -2,17 +2,16 @@
 # -*- coding: utf-8 -*-
 """One run is one country, and the failure these tests exist to prevent succeeds quietly.
 
-A run that reads Latvia and writes under `work/LT/` uploads cleanly, produces a valid index,
-and hands a Lithuanian reader Latvian tenders with nothing anywhere saying so. There is no
-error to notice. So the rule is structural rather than checked after the fact: the source
+A run that reads one country and writes under another's folder uploads cleanly, produces a
+valid index, and hands a reader the wrong country's tenders with nothing anywhere saying so.
+There is no error to notice. So the rule is structural rather than checked after the fact: the source
 and the destination are both derived from one resolved code, and every way of expressing a
 mismatch is refused at the point it is expressed.
 
 THIS REPOSITORY FETCHES ONE COUNTRY, AND THAT MAKES THE CHECK MORE IMPORTANT, NOT LESS.
-Lithuania is now a code this tool has no source for, so `--country LT` is refused here by
-the same line that refuses `EE` — which is exactly the guarantee a country-per-repository
-split has to provide. The Latvian tool cannot be pointed at Lithuania's portal, and it
-cannot be pointed at Lithuania's folder.
+Every code but `LV` is one this tool has no source for, and each is refused by the same
+line. That is the whole guarantee: this tool cannot be pointed at another portal, and it
+cannot be pointed at another folder.
 """
 
 import os
@@ -24,10 +23,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import changes
 import country
 
-# A code this repository deliberately has no source for. Lithuania is the one that matters —
-# it is the country that was split out of this tool, and the one a stale command line or a
-# copied secret is most likely to name.
-ELSEWHERE = "LT"
+# A code this repository deliberately has no source for — which is every code but `LV`, and
+# the shape of what a stale command line or a copied secret names.
+ELSEWHERE = "EE"
 
 
 class Resolve(unittest.TestCase):
@@ -45,7 +43,7 @@ class Resolve(unittest.TestCase):
         self.assertIn("no country", str(raised.exception))
 
     def test_a_code_that_is_not_two_letters_is_refused(self):
-        for bad in ("L", "LVA", "l_v", "../LT", "1V"):
+        for bad in ("L", "LVA", "l_v", "../EE", "1V"):
             with self.subTest(bad=bad), self.assertRaises(country.Mismatch):
                 country.resolve(bad)
 
@@ -77,8 +75,8 @@ class Destination(unittest.TestCase):
         self.assertIn("already ends in a country code", str(raised.exception))
 
     def test_a_root_naming_the_country_this_tool_is_not_is_refused_too(self):
-        # The likeliest misconfiguration of all: GRAPH_DEST_ROOT copied across from the
-        # Lithuanian deployment, still ending in its country folder.
+        # The likeliest misconfiguration of all: GRAPH_DEST_ROOT copied across from
+        # somewhere else, still ending in that country's folder.
         with self.assertRaises(country.Mismatch):
             country.destination("project/work/%s" % ELSEWHERE, "LV")
 

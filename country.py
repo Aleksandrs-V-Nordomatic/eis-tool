@@ -3,9 +3,9 @@
 """Which country a run is for, and everything that follows from it.
 
 One run is one country. The tool fetches from that country's portal and publishes under
-that country's folder, and the two must never come apart — a run reading Lithuania and
-writing under `work/LV/` is a failure that succeeds: the upload returns 200, the index is
-valid, and a Latvian reader is handed Lithuanian tenders with nothing anywhere saying so.
+that country's folder, and the two must never come apart — a run reading one country and
+writing under another's folder is a failure that succeeds: the upload returns 200, the index
+is valid, and a reader is handed the wrong country's tenders with nothing anywhere saying so.
 
 This repository is the Latvian tool and reads EIS only. The check below still runs, and
 still refuses, because a country tool that assumes its own country is a country tool that
@@ -17,14 +17,15 @@ mismatch expressible in the first place.
 
 THE DESTINATION IS DERIVED, NOT CONFIGURED. `GRAPH_DEST_ROOT` names the project's runtime
 folder — the `work/` a reader knows — and the country code is appended to it. It is not
-enough to ask the deployment to set `GRAPH_DEST_ROOT` to `…/work/LT` and trust it: that is
+enough to ask the deployment to set `GRAPH_DEST_ROOT` to a folder ending in a code and
+trust it: that is
 the same two-places-to-get-right this file exists to remove, and the first symptom of
 getting it wrong is a day of one country's tenders sitting in another's folder. A root that
 already ends in a country code is therefore refused rather than appended to, because
 `work/LV/LV` is the other way the same mistake shows up.
 
 THE SOURCE IS DERIVED TOO. A code with no source module is refused, never guessed at and
-never quietly served by the other country's reader.
+never quietly served by a reader written for somewhere else.
 """
 
 import re
@@ -90,8 +91,8 @@ def destination(base, code):
     """Where this country publishes: the runtime root, then the country's own folder.
 
     `base` is the project's `work/`. The country code is appended, giving the shape the
-    library already carries — `work/LV/`, `work/LT/` — so a reader that knows one country's
-    layout knows every country's.
+    library already carries — `work/<CC>/` — so a reader that knows one country's layout
+    knows every country's.
     """
     code = resolve(code)
     trimmed = (base or "").strip().strip("/")
@@ -113,8 +114,8 @@ def parser_files(code):
     `changes` records a parser version so that an improvement to a page reader — one more
     spelling of a label, a field that used to come back null — is not reported as an
     amendment on every procurement in the corpus. That only works if the version follows
-    the reader the run actually used: stamping Latvia's digest onto a Lithuanian
-    fingerprint makes an `eis_page` edit invisible and another country's a false alarm, in
+    the reader the run actually used: stamping one country's digest onto another's
+    fingerprint makes an `eis_page` edit invisible and an unrelated edit a false alarm, in
     the same run and for the same reason.
     """
     return (SOURCES[resolve(code)]["page"] + ".py",)
