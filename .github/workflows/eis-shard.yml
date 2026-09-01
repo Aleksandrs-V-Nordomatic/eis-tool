@@ -109,69 +109,6 @@ jobs:
         if: steps.go.outputs.go == 'yes'
         run: python3 -m unittest discover -s tests -t tests
 
-      # THE RECALL POLICY IS NOT A SECRET AND IS NOT THIS REPOSITORY'S.
-      #
-      # It is the caller's classification: which notices may be skipped before a byte moves. A
-      # secret was the wrong home for it — nobody can read a secret back, so nobody could review
-      # the one rule that decides what the whole pipeline never sees. It is authored where the
-      # scope it serves is authored, and fetched here at run time.
-      #
-      # This repository still learns nothing: the remote and the file are both secrets, and the
-      # file lands on the runner and nowhere else.
-      #
-      # IT IS FETCHED OVER GIT, AND THAT IS THE WHOLE POINT OF THE CREDENTIAL. A read-only
-      # deploy token reaches exactly one repository and nothing else — it cannot read another
-      # project, cannot call the API, cannot write. A personal token would have been one line
-      # shorter here and would have handed this repository a key to everything its owner can
-      # read, which is not a trade a workflow gets to make on somebody's behalf.
-      #
-      # Shallow, blobless and sparse, so one small file does not drag a history onto the runner;
-      # and the clone is removed straight after, because its `.git/config` is where the
-      # credential would otherwise sit for the rest of the job.
-      #
-      # CONFIGURED AND UNREACHABLE IS A STOP, not a shrug. `policy.py` treats an absent policy as
-      # "fetch everything", which is the right direction when no filter was asked for and the wrong
-      # one when a token expired: it would turn a bad credential into a threefold day against a
-      # state portal.
-      - name: Read the recall policy from where it is authored
-        if: ${{ steps.go.outputs.go == 'yes' && env.HAVE_POLICY_REMOTE == 'true' }}
-        env:
-          HAVE_POLICY_REMOTE: ${{ secrets.POLICY_REMOTE != '' }}
-          POLICY_REMOTE: ${{ secrets.POLICY_REMOTE }}
-          POLICY_FILE: ${{ secrets.POLICY_FILE }}
-        run: |
-          rm -rf policy-src
-          if ! git clone --quiet --depth 1 --filter=blob:none --sparse "$POLICY_REMOTE" policy-src; then
-            echo "the recall policy is configured and its repository could not be reached -" \
-                 "standing down rather than fetching a whole day unfiltered" >&2
-            exit 1
-          fi
-          git -C policy-src sparse-checkout set --no-cone "$POLICY_FILE" >/dev/null
-          if [ ! -s "policy-src/$POLICY_FILE" ]; then
-            echo "the recall policy is configured and its file is not in that repository" >&2
-            rm -rf policy-src
-            exit 1
-          fi
-          cp "policy-src/$POLICY_FILE" recall_policy.json
-          rm -rf policy-src
-          # PARSING IS NOT ENOUGH. `policy.py` reads a policy with no rules in it as no policy,
-          # and no policy means fetch everything — the right answer when nobody asked for a
-          # filter and the wrong one when a file arrived truncated, emptied or renamed around.
-          # A configured policy that says nothing is the third state, and it stops the run.
-          python3 - <<'CHECK' || exit 1
-          import json, sys
-          try:
-              policy = json.load(open("recall_policy.json", encoding="utf-8"))
-          except ValueError as exc:
-              sys.exit("the recall policy is configured and did not parse: %s" % exc)
-          rules = ("recall_title_terms", "hard_exclude_prefixes", "hard_exclude_title_terms",
-                   "override_prefixes", "recall_cpv_prefixes")
-          if not any(policy.get(name) for name in rules):
-              sys.exit("the recall policy is configured and carries no rule - it would load as "
-                       "no filter at all, which is a whole day fetched unfiltered")
-          CHECK
-          echo "recall policy read, $(wc -c < recall_policy.json) bytes"
-
       # A FIFTH OF WHAT THE PLATFORM PUBLISHES CARRIES NO REGISTER NOTICE, so discovery
       # cannot see it however complete its coverage proof looks — unregulated procurements,
       # market consultations, and closed competitions inside a dynamic purchasing system.
@@ -206,15 +143,9 @@ jobs:
           # Which notices are worth fetching is the caller's business and never the
           # repository's. Unset means no filter, and a discovery run then fetches every
           # notice it finds — the safe direction, and a loud one.
-          #
-          # The step above may have put the policy on disk. The file wins where it exists, and
-          # this stays as the older road for a deployment that has not moved yet.
           EIS_POLICY: ${{ secrets.EIS_POLICY }}
         run: |
           mkdir -p packs
-          # `policy.py` takes JSON text or a path, so the file needs no flag of its own.
-          [ -s recall_policy.json ] && export EIS_POLICY=recall_policy.json
-
           cat > targets.txt <<'TARGETS'
           ${{ inputs.targets }}
           TARGETS
