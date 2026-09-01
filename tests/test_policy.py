@@ -178,5 +178,57 @@ class OverriddenCodes(unittest.TestCase):
         self.assertEqual(rules[4], ())      # recall_cpv_prefixes
 
 
+class ExclusionsWithoutAWhitelist(unittest.TestCase):
+    """A policy may carry exclusions and no recall list at all.
+
+    A recall list is a whitelist, and a whitelist suits a caller who buys a nameable thing.
+    A caller whose scope hides inside somebody else's purchase needs the opposite gate: drop
+    what the buyer's own codes place outside, keep the rest, and let the documents decide.
+    Before this, a policy without recall terms loaded as `None` — no gate at all, exclusions
+    included — so the only way to have the exclusions was to accept the whitelist with them.
+    """
+
+    EXCLUSIONS_ONLY = json.dumps({
+        "hard_exclude_prefixes": ["99999"],
+        "hard_exclude_title_terms": ["omega"],
+    })
+
+    def setUp(self):
+        self.policy = policy.load_policy(self.EXCLUSIONS_ONLY)
+        self.assertIsNotNone(self.policy, "exclusions alone are a policy")
+
+    def test_a_title_nobody_whitelisted_is_kept(self):
+        """The failure this guards: an empty recall list matches nothing, so asking it
+        whether the title matched would drop every notice on earth."""
+        self.assertFalse(policy.outside_scope({"title": "Telpu atjaunošanas darbi"},
+                                              self.policy))
+
+    def test_an_excluded_title_term_still_vetoes(self):
+        self.assertTrue(policy.outside_scope({"title": "omega piegāde"}, self.policy))
+
+    def test_an_all_excluded_code_set_still_drops(self):
+        self.assertTrue(policy.outside_scope(
+            {"title": "kaut kas", "cpv": [{"code": "99999000-1"}]}, self.policy))
+
+    def test_one_code_outside_the_exclusions_keeps_it(self):
+        self.assertFalse(policy.outside_scope(
+            {"title": "kaut kas", "cpv": [{"code": "99999000-1"}, {"code": "45000000-7"}]},
+            self.policy))
+
+    def test_a_policy_with_no_rules_at_all_is_still_no_policy(self):
+        """Absent, unreadable and empty all mean fetch everything. That is unchanged: a
+        filter that failed to load must never be the reason a day came up short."""
+        self.assertIsNone(policy.load_policy(json.dumps({})))
+        self.assertIsNone(policy.load_policy(json.dumps({"recall_title_terms": []})))
+        self.assertIsNone(policy.load_policy("   "))
+
+    def test_recall_terms_still_work_when_they_are_given(self):
+        """Adding the exclusions-only shape may not change what a whitelist policy does."""
+        both = policy.load_policy(json.dumps({"recall_title_terms": ["alfa"],
+                                              "hard_exclude_prefixes": ["99999"]}))
+        self.assertFalse(policy.outside_scope({"title": "alfa piegāde"}, both))
+        self.assertTrue(policy.outside_scope({"title": "beta piegāde"}, both))
+
+
 if __name__ == "__main__":
     unittest.main()
