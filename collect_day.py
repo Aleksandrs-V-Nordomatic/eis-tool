@@ -49,6 +49,7 @@ import time
 # The Graph layer lives in one module, beside the delivery that writes through it. This file
 # only ever reads, but reading is not a second dialect of the same protocol and two copies of
 # the retry policy would drift the first time either was corrected.
+import idspace
 from deliver_graph import env, graph_token, item_at, json_at, text_at, upload
 
 
@@ -238,6 +239,27 @@ def collect(drive, base, date, shards, slices, run_id, tok):
     return day, changes
 
 
+def idspace_after(drive, base, date, shards, day, tok):
+    """Tonight's answers merged into the id space, or None when there is nothing to write.
+
+    Reads each shard's `idprobe.json` — absent on a runner that had no slice, or that died
+    before delivering, and absent everywhere until the walk is switched on. An id nobody
+    could reach is in no report at all: an unreachable page is not an answer, and recording
+    it as "not published" would retire a live id for as long as the state remembers it.
+    """
+    probes = {}
+    for n in range(1, shards + 1):
+        report = json_at(drive, "%s/%s/shards/eis-batch-shard-%d/idprobe.json" % (base, date, n), tok)
+        for pid, published in ((report or {}).get("probes") or {}).items():
+            probes[pid] = bool(published)
+
+    delivered = [t.get("pid") for t in day.get("tenders") or [] if str(t.get("pid") or "").isdigit()]
+    if not probes and not delivered:
+        return None
+    prior = json_at(drive, "%s/idspace.json" % base, tok)
+    return idspace.merge(prior, probes, date, discovered=delivered)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Write day.json from the shards that landed.")
     ap.add_argument("--date", required=True, help="YYYY-MM-DD, the day this batch belongs to")
@@ -262,6 +284,19 @@ def main(argv=None):
 
     upload(drive, "%s/%s/day.json" % (base, args.date),
            json.dumps(day, ensure_ascii=False).encode("utf-8"), tok)
+
+    # THE ID SPACE, WRITTEN ONCE AND HERE. Every shard asked the platform about a slice of
+    # tonight's ids and left its answers in `idprobe.json`; this is the only place that sees
+    # all of them, and it runs after all of them, so it is the only place that may write the
+    # state without two runners disagreeing about it.
+    #
+    # The day's own tenders are folded in as live. That is what seeds the frontier on a
+    # deployment that has never walked before — the first night plans nothing, this writes a
+    # frontier from what the register delivered, and the walk starts on the next run.
+    walked = idspace_after(drive, base, args.date, args.shards, day, tok)
+    if walked:
+        upload(drive, "%s/idspace.json" % base,
+               json.dumps(walked, ensure_ascii=False).encode("utf-8"), tok)
 
     # Counts, never the destination.
     print("day %s: %d tenders, %d documents, %.1f MB of text, shards %s present%s"

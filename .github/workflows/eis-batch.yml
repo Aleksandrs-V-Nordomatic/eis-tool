@@ -73,6 +73,15 @@ on:
         description: "The day this batch belongs to, YYYY-MM-DD. The caller owns it; blank means the runner's UTC date"
         required: false
         default: ""
+      walk:
+        description: "Also ask the platform about ids the register carries no notice for. Only ever alongside a window; a named list is what the caller asked for"
+        required: false
+        type: boolean
+        default: true
+      walk_budget:
+        description: "How many ids ALL runners together may ask about tonight. Blank uses the tool's own budget"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -104,6 +113,9 @@ jobs:
       skip_archive: ${{ inputs.skip_archive || false }}
       date: ${{ inputs.date || '' }}
       country: ${{ inputs.country || 'LV' }}
+      # Null on the push trigger, which has no inputs at all; `!= false` reads that as on.
+      walk: ${{ inputs.walk != false }}
+      walk_budget: ${{ inputs.walk_budget || '' }}
   # THE DAY'S LIST, AND THE PROOF THAT THERE IS A DAY.
   #
   # A reader that lists folders to find its work reads the wrong day: delivery overwrites files

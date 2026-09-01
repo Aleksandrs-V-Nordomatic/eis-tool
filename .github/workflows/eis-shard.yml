@@ -26,6 +26,10 @@ on:
       # This repository fetches LV only; anything else is refused by the gate below,
       # before a byte moves, rather than by the delivery hours later.
       country: {required: false, type: string, default: "LV"}
+      # ASK THE PLATFORM ABOUT IDS THE REGISTER HAS NO NOTICE FOR. Only ever alongside a
+      # window: a caller who named its tenders asked for those and not for a walk.
+      walk: {required: false, type: boolean, default: true}
+      walk_budget: {required: false, type: string, default: ""}
 
 permissions:
   contents: read
@@ -105,6 +109,30 @@ jobs:
         if: steps.go.outputs.go == 'yes'
         run: python3 -m unittest discover -s tests -t tests
 
+      # A FIFTH OF WHAT THE PLATFORM PUBLISHES CARRIES NO REGISTER NOTICE, so discovery
+      # cannot see it however complete its coverage proof looks — unregulated procurements,
+      # market consultations, and closed competitions inside a dynamic purchasing system.
+      # This asks the platform directly about a budgeted handful of ids and writes down the
+      # ones that turned out to be published; the fetch below picks them up in the same run,
+      # which is why it must be this job and not a second draw.
+      #
+      # Only with a window. A caller that named its targets asked for those.
+      - name: Ask about the ids the register cannot hand over
+        id: walk
+        if: ${{ steps.go.outputs.go == 'yes' && inputs.walk && (inputs.date_from != '' || inputs.date_to != '' || inputs.targets == '') }}
+        continue-on-error: true
+        env:
+          GRAPH_TENANT_ID: ${{ secrets.GRAPH_TENANT_ID }}
+          GRAPH_CLIENT_ID: ${{ secrets.GRAPH_CLIENT_ID }}
+          GRAPH_CLIENT_SECRET: ${{ secrets.GRAPH_CLIENT_SECRET }}
+          GRAPH_DRIVE_ID: ${{ secrets.GRAPH_DRIVE_ID }}
+          GRAPH_DEST_ROOT: ${{ secrets.GRAPH_DEST_ROOT }}
+          EIS_COUNTRY: ${{ inputs.country }}
+          WALK_BUDGET: ${{ inputs.walk_budget }}
+        run: |
+          mkdir -p packs
+          python3 idwalk.py             --shard ${{ inputs.shard }} --of ${{ inputs.shards }}             ${WALK_BUDGET:+--budget $WALK_BUDGET}             --pause "${{ inputs.pause }}"             --out walked.txt --report packs/idprobe.json > /dev/null
+
       - name: Fetch this shard, reading in the gaps
         if: steps.go.outputs.go == 'yes'
         env:
@@ -153,6 +181,18 @@ jobs:
           elif [ ! -s targets.txt ]; then
             WINDOW="--days ${{ inputs.days }}"
           fi
+          # THE WALK'S FINDS JOIN THE LIST AFTER THE WINDOW HAS BEEN DECIDED, never before:
+          # the `--days` fallback fires only on an empty target list, so appending first
+          # would silence it and the run would fetch the walk and drop the day.
+          #
+          # They are already this runner's — `idwalk` slices by the same digest
+          # `batch.take_shard` uses, so an id found here is fetched here.
+          if [ -s walked.txt ]; then
+            echo "id walk found $(wc -l < walked.txt) published id(s) the register has no notice for"
+            cat walked.txt >> targets.txt
+            sed -i 's/#.*//; s/[[:space:]]*$//; /^$/d' targets.txt
+          fi
+
           NAMED=""
           [ -s targets.txt ] && NAMED="--targets targets.txt"
 

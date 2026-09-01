@@ -88,6 +88,7 @@ KEEP_NAMES = {
     "manifest_normalized.json", "document.md",
     "structure.json",
     "done.txt", "failed.txt", "withdrawn.txt", "resolved.tsv",
+    "idprobe.json",
 }
 # THE CODES WORTH ASKING AGAIN ABOUT.
 #
@@ -649,7 +650,11 @@ def main(argv=None):
 
     # The shard's own arithmetic rides at the top, beside the change records, exactly as it
     # sits in the artifact: `collect` reads it to prove a whole day arrived.
-    for name in ("done.txt", "failed.txt", "withdrawn.txt", "resolved.tsv", "accounts.json"):
+    # `idprobe.json` rides with them: the ids this runner asked the platform about, and what
+    # each answered. The day's collector is the only writer of the id-space state, so this is
+    # how a shard's half of the night reaches it.
+    for name in ("done.txt", "failed.txt", "withdrawn.txt", "resolved.tsv", "accounts.json",
+                 "idprobe.json"):
         p = os.path.join(args.packs, name)
         if os.path.exists(p):
             with open(p, "rb") as fh:

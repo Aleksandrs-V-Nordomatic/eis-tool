@@ -17,6 +17,8 @@ on:
       skip_archive: {required: false, type: boolean, default: false}
       date: {required: false, type: string, default: ""}
       country: {required: false, type: string, default: "LV"}
+      walk: {required: false, type: boolean, default: true}
+      walk_budget: {required: false, type: string, default: ""}
 
 permissions:
   contents: read
@@ -39,6 +41,8 @@ jobs:
       skip_archive: ${{ inputs.skip_archive }}
       date: ${{ inputs.date }}
       country: ${{ inputs.country }}
+      walk: ${{ inputs.walk }}
+      walk_budget: ${{ inputs.walk_budget }}
 
   draw-2:
     needs: draw-1
@@ -58,6 +62,8 @@ jobs:
       skip_archive: ${{ inputs.skip_archive }}
       date: ${{ inputs.date }}
       country: ${{ inputs.country }}
+      walk: ${{ inputs.walk }}
+      walk_budget: ${{ inputs.walk_budget }}
 
   draw-3:
     needs: draw-2
@@ -77,3 +83,5 @@ jobs:
       skip_archive: ${{ inputs.skip_archive }}
       date: ${{ inputs.date }}
       country: ${{ inputs.country }}
+      walk: ${{ inputs.walk }}
+      walk_budget: ${{ inputs.walk_budget }}

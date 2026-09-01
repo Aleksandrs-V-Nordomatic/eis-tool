@@ -154,9 +154,11 @@ def discover(days=1, date_from=None, date_to=None, resolve_links=True):
 
     What that leaves out, deliberately: a procurement below the publication duty never
     reaches the register, so it is not discovered here and no count below refers to it.
-    Enumerating those means walking EIS ids instead (`eis_page.walk_ids`, present and
-    unused). Until something calls it, "the window" means the register's window and
-    nothing wider — say so rather than let a complete-looking day imply otherwise.
+    Enumerating those means walking EIS ids instead, which `idwalk.py` now does as a second
+    source beside this one. It does not widen this function: "the window" here still means
+    the register's window and nothing more, and the counts below still describe only what
+    the register carries. A caller reading a complete-looking day gets the truth from both
+    or from neither.
 
     HOW MUCH THAT IS, MEASURED. Walking ids 179550-179800 and putting each page to the
     register: 129 of 251 ids were live, and 25 of those 129 — a fifth — had no register
