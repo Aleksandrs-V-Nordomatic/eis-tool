@@ -144,7 +144,7 @@ jobs:
             out/procurement.json
             out/normalized/**
             out/llm/**
-          retention-days: 14
+          retention-days: 1
 
       - name: Upload the originals
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -152,7 +152,7 @@ jobs:
         with:
           name: eis-tender-originals
           path: out/eis_*_originals.zip
-          retention-days: 3
+          retention-days: 1
           compression-level: 0
 
       # Evidence outlives a failure — a run that dies leaving nothing behind forces the
