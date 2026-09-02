@@ -218,7 +218,7 @@ jobs:
             packs/withdrawn.txt
             packs/resolved.tsv
             packs/accounts.json
-          retention-days: 14
+          retention-days: 1
 
       # DELIVER THE TEXT WHERE THE CONSUMER CAN REACH IT. An artifact's metadata is served by
       # api.github.com and its bytes are a 302 to `*.blob.core.windows.net` — a different
