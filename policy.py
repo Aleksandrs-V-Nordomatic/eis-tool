@@ -23,13 +23,40 @@ import os
 # substrings rather than as whole words because the language this runs against inflects
 # heavily; precision belongs to the later document-reading step, not to a title.
 #
-# Two guards matter, and both fail toward fetching:
-#   * no title means no evidence, so the notice is fetched;
-#   * a classification code never vetoes a matching title, because the code is assigned by
-#     the buyer and an imperfect one must not silently drop a notice whose title matches.
+# One guard, and it fails toward fetching: no text at all means no evidence, so the notice is
+# fetched.
 #
-# Exclusions win over recall, and exclusion by code prefix covers notices whose title is
-# absent or unhelpful.
+# EXCLUSIONS WIN OVER RECALL, INCLUDING OVER A MATCHING TITLE, AND THAT IS DELIBERATE. This
+# paragraph used to claim the opposite in the line above it -- that a classification code never
+# vetoes a matching title -- while the code below did what it does now: `hard_exclude_prefixes`
+# is tested BEFORE the recall terms and returns. The two sentences stood side by side for
+# months. The code was right and the sentence was wrong, and it was settled by measurement
+# rather than by preference.
+#
+# WHAT THE MEASUREMENT SAID. Both orders were run over 5 925 real Latvian notices spanning
+# 9 June to 6 September 2026, against the live recall policy: they kept 2 147 each and
+# disagreed about none of them. Only four notices in three months reached the contested branch
+# at all -- and all four were car-park management systems, CPV 98351000 and 34926000, whose
+# titles say `vadības sistēma`, control system, and match the recall terms perfectly. Dropping
+# them is the entire reason those prefixes were written.
+#
+# So the rule that reads well is also the rule that is useless: a code exclusion that could not
+# override a matching title could never drop anything, because a notice whose title does not
+# match is dropped by the recall test anyway. `hard_exclude_prefixes` exists for exactly the
+# notice that matches and is still not ours.
+#
+# WHICH PUTS THE WHOLE WEIGHT ON HOW NARROWLY A PREFIX IS WRITTEN, and that is the warning this
+# paragraph is really for. An exclusion is absolute for a notice carrying no other code. Both
+# live policies write theirs four to six digits long -- specific purchases, not divisions -- and
+# that is why the branch fires four times a quarter instead of gutting the day. Measured on the
+# same corpus, adding one two-digit division would silently drop, out of 2 147 kept notices:
+#
+#     45  construction works                    591
+#     71  architecture and engineering          420
+#     50  repair and maintenance services       204
+#
+# Those are the divisions our own work is filed under. Write a prefix that names a purchase,
+# never one that names a division, and reach for `override_prefixes` before widening one.
 #
 # WHAT THIS KNOWS ABOUT THE CALLER'S INTEREST: NOTHING — the same rule deliver_graph.py
 # keeps about its destination. The terms arrive in the environment, so this file names no
