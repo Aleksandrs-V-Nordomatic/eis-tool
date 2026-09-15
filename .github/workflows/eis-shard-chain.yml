@@ -19,6 +19,7 @@ on:
       country: {required: false, type: string, default: "LV"}
       walk: {required: false, type: boolean, default: true}
       walk_budget: {required: false, type: string, default: ""}
+      walk_hand: {required: false, type: string, default: ""}
 
 permissions:
   contents: read
@@ -43,6 +44,7 @@ jobs:
       country: ${{ inputs.country }}
       walk: ${{ inputs.walk }}
       walk_budget: ${{ inputs.walk_budget }}
+      walk_hand: ${{ inputs.walk_hand }}
 
   draw-2:
     needs: draw-1
@@ -64,6 +66,7 @@ jobs:
       country: ${{ inputs.country }}
       walk: ${{ inputs.walk }}
       walk_budget: ${{ inputs.walk_budget }}
+      walk_hand: ${{ inputs.walk_hand }}
 
   draw-3:
     needs: draw-2
@@ -85,3 +88,4 @@ jobs:
       country: ${{ inputs.country }}
       walk: ${{ inputs.walk }}
       walk_budget: ${{ inputs.walk_budget }}
+      walk_hand: ${{ inputs.walk_hand }}

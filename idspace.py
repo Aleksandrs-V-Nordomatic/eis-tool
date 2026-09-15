@@ -41,13 +41,16 @@ DEFAULT_BUDGET = 500
 #
 # The budget caps the questions; this caps what the answers cost. Half the ids in the window
 # are live, so a first walk over an unknown window finds them by the hundred — and hands them
-# to a fetch that downloads every document of every one. The first night would be an order of
-# magnitude larger than the day the pipeline is sized for, against a public portal, and every
-# night after it would be nearly nothing.
+# to a fetch that downloads every document of every one. A found id is therefore remembered
+# as live and queued, and the queue drains at this rate, newest first.
 #
-# So a found id is remembered as live and queued, and the queue drains at a steady rate. The
-# work is the same work; it arrives at the speed the rest of the run was built for.
-DEFAULT_HANDOVER = 10
+# The rate has to outrun the finds or the queue is where tenders go to expire. At 10 a night
+# it did exactly that: by 14 September 2026 the Latvian state held 1 480 owed ids against a
+# walk that finds 30–50 live ones a night, and tenders published in August sat in the queue
+# past their deadlines, unread. 200 clears that backlog in about a week and, once it is gone,
+# hands over a night's finds whole. A tender read once costs the reader a no-change record
+# every night after; a tender never read costs the bid.
+DEFAULT_HANDOVER = 200
 # Above the frontier there is no history to consult, so the walk goes up until the misses
 # say the space has run out. `eis_page.walk_ids` stops after 40 consecutive misses; the
 # forward reach here is that plus room for one more gap, and it is the only part of the plan

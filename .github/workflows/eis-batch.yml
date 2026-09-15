@@ -82,6 +82,10 @@ on:
         description: "How many ids ALL runners together may ask about tonight. Blank uses the tool's own budget"
         required: false
         default: ""
+      walk_hand:
+        description: "How many ids the walk may hand the fetch tonight, queue first. Blank uses the tool's own rate; a big number drains the queue in one run"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -116,6 +120,7 @@ jobs:
       # Null on the push trigger, which has no inputs at all; `!= false` reads that as on.
       walk: ${{ inputs.walk != false }}
       walk_budget: ${{ inputs.walk_budget || '' }}
+      walk_hand: ${{ inputs.walk_hand || '' }}
   # THE DAY'S LIST, AND THE PROOF THAT THERE IS A DAY.
   #
   # A reader that lists folders to find its work reads the wrong day: delivery overwrites files

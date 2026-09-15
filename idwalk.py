@@ -151,7 +151,8 @@ def main(argv=None):
     # WHAT THE FETCH IS GIVEN IS CAPPED SEPARATELY FROM WHAT IS ASKED. Half the ids in an
     # unwalked window are live, so a first walk finds them by the hundred and would hand a
     # day's fetch ten days of work. The rest are not lost: they are owed, and the queue in
-    # the state drains at this rate every run.
+    # the state drains at this rate every run — a rate that must beat the finds, or the
+    # queue only grows (`idspace.DEFAULT_HANDOVER` says what that cost once).
     #
     # The cap is for all runners together, so each takes its share. It is sliced by the
     # fetch's own rule, like the questions were, or a runner would hand over an id another

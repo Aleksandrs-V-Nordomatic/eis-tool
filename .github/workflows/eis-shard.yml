@@ -30,6 +30,7 @@ on:
       # window: a caller who named its tenders asked for those and not for a walk.
       walk: {required: false, type: boolean, default: true}
       walk_budget: {required: false, type: string, default: ""}
+      walk_hand: {required: false, type: string, default: ""}
 
 permissions:
   contents: read
@@ -129,9 +130,10 @@ jobs:
           GRAPH_DEST_ROOT: ${{ secrets.GRAPH_DEST_ROOT }}
           EIS_COUNTRY: ${{ inputs.country }}
           WALK_BUDGET: ${{ inputs.walk_budget }}
+          WALK_HAND: ${{ inputs.walk_hand }}
         run: |
           mkdir -p packs
-          python3 idwalk.py             --shard ${{ inputs.shard }} --of ${{ inputs.shards }}             ${WALK_BUDGET:+--budget $WALK_BUDGET}             --pause "${{ inputs.pause }}"             --out walked.txt --report packs/idprobe.json > /dev/null
+          python3 idwalk.py             --shard ${{ inputs.shard }} --of ${{ inputs.shards }}             ${WALK_BUDGET:+--budget $WALK_BUDGET}             ${WALK_HAND:+--hand $WALK_HAND}             --pause "${{ inputs.pause }}"             --out walked.txt --report packs/idprobe.json > /dev/null
 
       - name: Fetch this shard, reading in the gaps
         if: steps.go.outputs.go == 'yes'
