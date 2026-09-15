@@ -151,6 +151,17 @@ class TheQueue(unittest.TestCase):
         self.assertEqual(len(idspace.hand_over(state, [], limit=4)), 4)
         self.assertEqual(idspace.hand_over(state, [], limit=0), [])
 
+    def test_the_default_rate_beats_what_a_night_finds(self):
+        """The walk finds 30–50 live ids a night; a rate under that is a queue that only grows,
+        and a queue that only grows is where tenders expire unread. 1 480 owed ids by
+        14 September 2026 is what the old rate of 10 produced."""
+        state = idspace.empty()
+        for night in range(7):
+            found = list(range(1000 + night * 50, 1050 + night * 50))
+            state = idspace.merge(state, {n: True for n in found}, "2026-09-%02d" % (night + 1),
+                                  handed=idspace.hand_over(state, found))
+        self.assertEqual(state["pending"], [], "a week of ordinary nights leaves nothing owed")
+
     def test_a_runner_only_hands_over_what_it_would_fetch(self):
         state = idspace.merge(idspace.empty(), {n: True for n in range(100, 140)}, "2026-09-02")
         handed = idspace.hand_over(state, [], limit=50, owner=lambda pid: pid % 4 + 1, shard=3)

@@ -36,7 +36,10 @@ service.
 **What the walk finds is handed over at a steady rate.** The budget caps the questions; a
 separate cap limits what the answers cost, because half the ids in an unwalked window are
 live and a first walk would otherwise hand one day's fetch ten days of work. The surplus is
-not dropped — it is owed, queued in the same state, and drains a few a night.
+not dropped — it is owed, queued in the same state, and drains newest first at 200 a night,
+which is more than a night finds, so the queue only exists after a first walk or a gap.
+`walk_hand` on the batch workflow overrides the rate for one run — set it high to drain the
+queue at once, and nothing lower than the night's finds, or the queue is where tenders expire.
 
 Which ids get asked about is `idspace.py`, and the answers are remembered at
 `<country>/idspace.json` beside the delivery, because a runner is new every night. Every
