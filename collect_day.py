@@ -33,6 +33,10 @@ A SHORT DAY IS STILL A DAY, AND IT SAYS SO. If a shard delivered nothing, its nu
 work is still worth reading — but nothing downstream can mistake it for a whole day, which is
 the failure this project keeps returning to.
 
+NO SHARD AT ALL IS NOT A DAY. When every shard is missing nothing is written — not the list,
+not the diff, not the id space — and the step exits 1, so the run is red and a date already
+delivered keeps what it holds.
+
 WHAT IT DECIDES. One thing only: which slice of the day each tender belongs to, balanced by
 extracted characters rather than by count, because tenders differ by orders of magnitude in
 size. No judgement about tenders is made or can be: that is the consumer's business and
@@ -279,6 +283,19 @@ def main(argv=None):
     tok = graph_token()
 
     day, changes = collect(drive, base, args.date, args.shards, args.slices, args.run_id, tok)
+
+    # NO SHARD AT ALL IS NOT A SHORT DAY, IT IS NO DAY. Every shard stands down green when
+    # the register refuses its address, so on 2026-10-21 four refused shards and this step
+    # together made a night of nothing look like a quiet one. Writing that list would also
+    # replace whatever an earlier run, or a run by hand, delivered for the date. Nothing is
+    # written and the run goes red; a reader finding no list stops and says so, which is
+    # the behaviour the list exists to make possible.
+    if not day["shards_present"]:
+        print("day %s: no shard delivered (missing %s%s) — nothing written, the date keeps "
+              "whatever it held" % (args.date, day["shards_missing"],
+                                    "; stale %s" % day["shards_stale"] if day["shards_stale"] else ""),
+              file=sys.stderr)
+        return 1
 
     # The diff before the list, for the same reason the list goes after the shards: day.json
     # is the proof that the day is there to be read, and it names `changes.json`. A reader
