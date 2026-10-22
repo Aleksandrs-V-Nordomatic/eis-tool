@@ -38,8 +38,18 @@ permissions:
 
 jobs:
   shard:
-    runs-on: ubuntu-latest
+    # WHERE THE REGISTER STILL ANSWERS. Since 2026-10-21 the IUB register refuses every
+    # GitHub-hosted address, and a refused probe stands the shard down green — a whole day of
+    # empty shards that looks like a quiet night. The repository variable SHARD_RUNS_ON names
+    # a runner the register does answer, as a JSON label list such as
+    # ["self-hosted","eis-lv"]; unset, the shards run where they always have.
+    runs-on: ${{ fromJSON(vars.SHARD_RUNS_ON || '"ubuntu-latest"') }}
     timeout-minutes: 350
+    # One shell on both kinds of runner. A Windows runner otherwise runs `run:` in PowerShell,
+    # and every step below is bash.
+    defaults:
+      run:
+        shell: bash
     # The toolchain arrives as a layer instead of being assembled by apt on every job.
     # Speed is the smaller half of why: LibreOffice and Tesseract are now the SAME versions
     # on every run, which is what "same bytes in, same text out" needed and did not have —
@@ -51,8 +61,12 @@ jobs:
     # own the repository when it was written. `image.yml` prints the value to set after a
     # build. Unset, this job fails immediately and says so — which is the right failure,
     # because the alternative is running against somebody else's image.
-    container:
-      image: ${{ vars.TOOLCHAIN_IMAGE }}
+    # A runner named by SHARD_RUNS_ON carries the toolchain itself and may have no Docker at
+    # all; an empty string here is how a job says "no container" (the string form only — an
+    # empty `image:` under a mapping is an error).
+    # The placeholder keeps the old failure for a hosted runner with no image configured: a
+    # pull that cannot succeed, rather than a run without converters that quietly reads less.
+    container: ${{ vars.SHARD_RUNS_ON == '' && (vars.TOOLCHAIN_IMAGE || 'set-the-TOOLCHAIN_IMAGE-variable') || '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 

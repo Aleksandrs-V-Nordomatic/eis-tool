@@ -654,6 +654,7 @@ def _soffice():
 
 
 def legacy_to_md(path, media_dir, stem, kind):
+    import pathlib
     import subprocess
     import tempfile
     binary = _soffice()
@@ -662,9 +663,12 @@ def legacy_to_md(path, media_dir, stem, kind):
     with tempfile.TemporaryDirectory() as tmp:
         # A private profile per call: LibreOffice refuses to run twice against one profile,
         # and a shared profile would make the result depend on run order.
+        # A real file URI, not "file://" glued to a path: on Windows that gives
+        # file://C:/..., which LibreOffice reads as a host named C, answers with a
+        # "bootstrap.ini corrupted" dialog, and waits for a click that never comes.
         proc = subprocess.run(
             [binary, "--headless", "--norestore",
-             "-env:UserInstallation=file://%s" % os.path.join(tmp, "profile").replace("\\", "/"),
+             "-env:UserInstallation=" + pathlib.Path(tmp, "profile").as_uri(),
              "--convert-to", LEGACY[kind], "--outdir", tmp, os.path.abspath(path)],
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=180)
         produced = [os.path.join(tmp, n) for n in os.listdir(tmp)
