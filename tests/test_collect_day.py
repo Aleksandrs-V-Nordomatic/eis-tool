@@ -58,7 +58,7 @@ class FakeDrive(object):
         n = self._shard_of(path)
         if n is None or n not in self.shards:
             return None
-        if path.endswith("/index.json") and path.count("/") == 4:
+        if path.endswith("/shards/eis-batch-shard-%d/index.json" % n):
             body = self.shards[n]
             return body if isinstance(body, dict) else {"tenders": body}
         return None
@@ -301,6 +301,35 @@ class Slices(unittest.TestCase):
         bins = collect_day.balance([{"pid": "a", "chars": 1}], 4)
         self.assertEqual(sum(len(b["pids"]) for b in bins), 1)
         self.assertEqual(len(bins), 4)
+
+
+class NoShardArrived(unittest.TestCase):
+    """Every shard missing is not a short day; it is no day.
+
+    On 2026-10-21 the register refused every runner, all four shards stood down green, and
+    this step wrote a day of nothing over the date and exited 0. The run looked like a quiet
+    night, and a second run for the same date would have erased a day delivered by hand.
+    """
+
+    def run_main(self, shards):
+        FakeDrive(shards).install(self)
+        uploaded = []
+        for name, fake in (("env", lambda name: "x"), ("graph_token", lambda: "t"),
+                           ("upload", lambda drive, path, body, tok: uploaded.append(path))):
+            self.addCleanup(setattr, collect_day, name, getattr(collect_day, name))
+            setattr(collect_day, name, fake)
+        code = collect_day.main(["--date", "2026-08-11", "--shards", "4", "--country", "LV"])
+        return code, uploaded
+
+    def test_the_run_fails_and_writes_nothing(self):
+        code, uploaded = self.run_main({})
+        self.assertEqual(code, 1)
+        self.assertEqual(uploaded, [])
+
+    def test_one_shard_is_still_a_short_day_worth_writing(self):
+        code, uploaded = self.run_main({2: [tender("222", [20])]})
+        self.assertEqual(code, 0)
+        self.assertTrue(any(p.endswith("/2026-08-11/day.json") for p in uploaded))
 
 
 class TheIdSpace(unittest.TestCase):
