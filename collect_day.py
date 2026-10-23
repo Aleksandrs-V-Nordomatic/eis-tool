@@ -84,7 +84,7 @@ def balance(tenders, slices):
 
 def collect(drive, base, date, shards, slices, run_id, tok):
     """Read every shard's delivered index and turn it into one list, and one diff."""
-    present, missing, lost, tenders, moves, stale = [], [], [], [], [], []
+    present, missing, lost, tenders, moves, stale, probed = [], [], [], [], [], [], []
     expected, excused, resolved = set(), set(), {}
 
     for n in range(1, shards + 1):
@@ -104,6 +104,10 @@ def collect(drive, base, date, shards, slices, run_id, tok):
             missing.append(n)
             continue
         present.append(n)
+        # Only a delivery that carried the walk's answers names them; an index from before
+        # the flag existed is read as it always was.
+        if index.get("idprobe", True):
+            probed.append(n)
 
         # What the whole day was asked for, as this shard saw it, and what it could not
         # deliver of its own slice. Unioned across shards because each one walks the register
@@ -221,12 +225,16 @@ def collect(drive, base, date, shards, slices, run_id, tok):
         "complete": not missing and not unaccounted,
         "coverage": {"targets": len(expected), "delivered": len(tenders),
                      "excused": len(expected & excused), "unaccounted": unaccounted},
+        # The sets behind the coverage, so a later run of this date can add to them rather
+        # than start again — see `accumulate`.
+        "accounts": {"expected": sorted(expected), "excused": sorted(excused)},
         "shards_expected": shards,
         "shards_present": present,
         "shards_missing": missing,
         # Named apart from the merely absent: a stale index means an earlier run of this date
         # left one behind, which reads very differently from a shard that never ran.
         "shards_stale": stale,
+        "shards_probed": probed,
         "slices": slices,
         "counts": dict(
             by_status,
@@ -243,6 +251,127 @@ def collect(drive, base, date, shards, slices, run_id, tok):
     return day, changes
 
 
+# WHAT A DATE DID TO A TENDER, OVER ALL ITS RUNS. A tender first seen this morning is new on
+# this date however often it is read again, and one that changed at ten stays changed when
+# the watch list reads it unchanged at midnight.
+RANK = {"unchanged": 1, "changed": 2, "new": 3}
+
+
+def stronger(earlier, later):
+    return later if RANK.get(later, 0) >= RANK.get(earlier, 0) else earlier
+
+
+def summary(day):
+    """One run of a date, as the date's list remembers it."""
+    return {"run_id": day.get("run_id"), "written_at": day.get("written_at"),
+            "shards_expected": day.get("shards_expected"),
+            "shards_present": day.get("shards_present") or [],
+            "shards_missing": day.get("shards_missing") or [],
+            "shards_stale": day.get("shards_stale") or [],
+            "tenders": len(day.get("tenders") or []),
+            "complete": bool(day.get("complete"))}
+
+
+def accumulate(prior_day, prior_changes, day, changes, slices):
+    """This run's list and diff added to what the earlier runs of the same date delivered.
+
+    A DATE IS FETCHED MANY TIMES A DAY. Since 2026-10-23 a run is dispatched every half hour
+    from the owner's laptop and filed under the Riga date, and the reader still opens one
+    folder per day. The shard indexes cannot carry the morning — the next run of the date
+    overwrites them — so the earlier runs come from the date's own `day.json`. A tender read
+    twice is one entry with the stronger reading; a change an earlier run recorded stays under
+    `earlier`, because the tender's own `runs/<date>.json` was replaced by the later reading.
+    Collecting the same run twice (a re-run job) counts it once.
+    """
+    run = day.get("run_id")
+    if not prior_day or prior_day.get("date") != day["date"]:
+        prior_day = {}
+    if not prior_day or not prior_changes or prior_changes.get("date") != day["date"]:
+        prior_changes = {}
+
+    def earlier_run(entry):
+        return not run or str(entry.get("run_id") or "") != str(run)
+
+    # A list written before `runs` existed is one run, described by its own fields.
+    before = prior_day.get("runs")
+    if before is None:
+        before = [summary(prior_day)] if prior_day else []
+    runs = [r for r in before if earlier_run(r)] + [summary(day)]
+
+    listed = {}
+    for t in prior_day.get("tenders") or []:
+        t = dict(t)
+        t.setdefault("run_id", prior_day.get("run_id"))
+        t.setdefault("runs", [t["run_id"]])
+        listed[t["pid"]] = t
+    for t in day["tenders"]:
+        mine = dict(t, run_id=run, runs=[run])
+        old = listed.get(t["pid"])
+        if old:
+            mine["status"] = stronger(old.get("status"), t.get("status"))
+            mine["runs"] = [r for r in old["runs"] if r != run] + [run]
+        listed[t["pid"]] = mine
+    tenders = sorted(listed.values(), key=lambda t: t["pid"])
+
+    moved = {}
+    for m in prior_changes.get("tenders") or []:
+        m = dict(m)
+        m.setdefault("run_id", prior_changes.get("run_id"))
+        moved[m["pid"]] = m
+    for m in changes["tenders"]:
+        mine = dict(m, run_id=run)
+        old = moved.get(m["pid"])
+        if old:
+            mine["status"] = stronger(old.get("status"), m.get("status"))
+            earlier = list(old.get("earlier") or [])
+            if earlier_run(old) and old.get("status") in ("new", "changed"):
+                earlier.append({k: v for k, v in old.items() if k != "earlier"})
+            if earlier:
+                mine["earlier"] = earlier
+        moved[m["pid"]] = mine
+    moves = sorted(moved.values(), key=lambda m: m["pid"])
+
+    owed = prior_day.get("accounts")
+    if owed is None:
+        # A list from before `accounts`: what it could not account for is still owed.
+        owed = {"expected": (prior_day.get("coverage") or {}).get("unaccounted") or [],
+                "excused": []}
+    expected = set(owed.get("expected") or []) | set(day["accounts"]["expected"])
+    excused = set(owed.get("excused") or []) | set(day["accounts"]["excused"])
+    arrived = {"eis:%s" % t["pid"] for t in tenders}
+    unaccounted = sorted(expected - excused - arrived)
+    # Whole means every target any run of the date named reached it or was settled, and the
+    # latest run lost no shard.
+    complete = not unaccounted and not day["shards_missing"]
+
+    lost = {}
+    for entry in list(prior_day.get("lost") or []) + [dict(e, run_id=run) for e in day["lost"]]:
+        lost[entry.get("entry")] = entry
+
+    bins = balance(tenders, slices)
+    by_status, by_move = {}, {}
+    for t in tenders:
+        by_status[t.get("status") or "unknown"] = by_status.get(t.get("status") or "unknown", 0) + 1
+    for m in moves:
+        by_move[m.get("status") or "unknown"] = by_move.get(m.get("status") or "unknown", 0) + 1
+
+    merged_day = dict(
+        day, complete=complete, runs=runs, tenders=tenders, lost=list(lost.values()),
+        accounts={"expected": sorted(expected), "excused": sorted(excused)},
+        coverage={"targets": len(expected), "delivered": len(tenders),
+                  "excused": len(expected & excused), "unaccounted": unaccounted},
+        counts=dict(by_status, tenders=len(tenders),
+                    documents=sum(t["documents"] for t in tenders),
+                    chars=sum(t["chars"] for t in tenders),
+                    unreadable=sum(t["unreadable"] for t in tenders)),
+        slice_load=[{"slice": b["slice"], "tenders": len(b["pids"]), "chars": b["chars"]}
+                    for b in bins])
+    merged_changes = dict(changes, complete=complete, unaccounted=unaccounted,
+                          runs=[r["run_id"] for r in runs],
+                          counts=dict(by_move, tenders=len(moves)), tenders=moves)
+    return merged_day, merged_changes
+
+
 def idspace_after(drive, base, date, shards, day, tok):
     """Tonight's answers merged into the id space, or None when there is nothing to write.
 
@@ -252,7 +381,10 @@ def idspace_after(drive, base, date, shards, day, tok):
     it as "not published" would retire a live id for as long as the state remembers it.
     """
     probes, handed = {}, []
-    for n in range(1, shards + 1):
+    # `shards` is a count (every shard, the old call) or the shards whose delivery carried
+    # this run's answers. A walk's answers merged twice count every blank id twice.
+    numbers = range(1, shards + 1) if isinstance(shards, int) else shards
+    for n in numbers:
         report = json_at(drive, "%s/%s/shards/eis-batch-shard-%d/idprobe.json" % (base, date, n), tok)
         for pid, published in ((report or {}).get("probes") or {}).items():
             probes[pid] = bool(published)
@@ -297,6 +429,13 @@ def main(argv=None):
               file=sys.stderr)
         return 1
 
+    # ADD TO THE DATE, NEVER REPLACE IT. A run every half hour is filed under one date; what the
+    # earlier runs delivered is in the date's own lists, read here and merged with this run.
+    this_run = day
+    day, changes = accumulate(json_at(drive, "%s/%s/day.json" % (base, args.date), tok),
+                              json_at(drive, "%s/%s/changes.json" % (base, args.date), tok),
+                              day, changes, args.slices)
+
     # The diff before the list, for the same reason the list goes after the shards: day.json
     # is the proof that the day is there to be read, and it names `changes.json`. A reader
     # holding a list that points at a file still arriving is the one state worth preventing.
@@ -314,7 +453,7 @@ def main(argv=None):
     # The day's own tenders are folded in as live. That is what seeds the frontier on a
     # deployment that has never walked before — the first night plans nothing, this writes a
     # frontier from what the register delivered, and the walk starts on the next run.
-    walked = idspace_after(drive, base, args.date, args.shards, day, tok)
+    walked = idspace_after(drive, base, args.date, this_run["shards_probed"], this_run, tok)
     if walked:
         upload(drive, "%s/idspace.json" % base,
                json.dumps(walked, ensure_ascii=False).encode("utf-8"), tok)
@@ -331,6 +470,8 @@ def main(argv=None):
     print("  coverage: %d target(s), %d delivered, %d settled, %d unaccounted"
           % (day["coverage"]["targets"], day["coverage"]["delivered"],
              day["coverage"]["excused"], len(day["coverage"]["unaccounted"])))
+    print("  this run: %d tender(s); the date now holds %d run(s)"
+          % (this_run["counts"]["tenders"], len(day["runs"])))
     if day["coverage"]["unaccounted"]:
         print("  %d of %d target(s) reached no shard — the day is short: %s"
               % (len(day["coverage"]["unaccounted"]), day["coverage"]["targets"],

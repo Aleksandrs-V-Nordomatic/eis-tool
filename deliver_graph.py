@@ -671,7 +671,11 @@ def main(argv=None):
     # The day's whole target list as this shard saw it, carried so `collect_day` can tell a
     # short day from a full one — see `batch.write_accounts` for what it measures and why.
     index = {"date": args.date, "shard": args.shard, "run_id": args.run_id or None,
-             "accounts": load_json(args.packs, "accounts.json"), "tenders": []}
+             "accounts": load_json(args.packs, "accounts.json"), "tenders": [],
+             # WHETHER THIS DELIVERY CARRIED THE WALK'S ANSWERS. A run that did not walk
+             # uploads no `idprobe.json`, so the last walk's file stays in this folder; the
+             # collector merges it only when this says it is this delivery's own.
+             "idprobe": os.path.exists(os.path.join(args.packs, "idprobe.json"))}
     allowed, withheld = publishable(args.packs), []
     for pid in sorted(os.listdir(args.packs)):
         pack = os.path.join(args.packs, pid)

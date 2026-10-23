@@ -707,5 +707,21 @@ class ChunkedUpload(unittest.TestCase):
         self.assertEqual(chunks, [b"abcd", b"efgh", b"ij"])
 
 
+class TheIndexSaysWhetherTheWalkRode(Delivery):
+    """A run that did not walk leaves the last walk's `idprobe.json` in the shard folder; the
+    collector must be able to tell, or it merges the same answers into the id space twice."""
+
+    def test_the_index_says_when_this_delivery_carried_walk_answers(self):
+        pack(self.root, "111", [("nolikums.pdf", "first tender text")])
+        with open(os.path.join(self.root, "done.txt"), "w", encoding="utf-8") as fh:
+            fh.write("111\n")
+        self.deliver()
+        self.assertFalse(self.drive.body("%s/index.json" % self.day())["idprobe"])
+        with open(os.path.join(self.root, "idprobe.json"), "w", encoding="utf-8") as fh:
+            json.dump({"probes": {"900": True}, "handed": []}, fh)
+        self.deliver()
+        self.assertTrue(self.drive.body("%s/index.json" % self.day())["idprobe"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -378,5 +378,147 @@ class TheIdSpace(unittest.TestCase):
         self.assertEqual(after["live"], [1000, 1001])
 
 
+class TheDateAccumulates(unittest.TestCase):
+    """Every half hour a run of the same date, and one folder for the reader.
+
+    Since 2026-10-23 code on the owner's laptop dispatches a run every thirty minutes, each
+    filed under the Riga date. A list that replaced what the date held would describe only the
+    last half hour; the reader would see one day folder that had forgotten the morning.
+    """
+
+    def run_of(self, run_id, pids, status="new", targets=(), shards=1, missing=(), idprobe=False):
+        index = {"run_id": run_id, "idprobe": idprobe,
+                 "accounts": {"targets": list(targets), "failed": [], "withdrawn": []},
+                 "tenders": [tender(p, [10], status=status) for p in pids]}
+        layout = {n: (index if n == 1 else {"run_id": run_id, "tenders": []})
+                  for n in range(1, shards + 1) if n not in missing}
+        FakeDrive(layout).install(self)
+        return collect_day.collect("drive1", "base", "2026-08-11", shards, 4, run_id, "t")
+
+    def add(self, prior, run):
+        return collect_day.accumulate(prior[0], prior[1], run[0], run[1], 4)
+
+    def test_a_later_run_adds_its_tenders_to_the_date(self):
+        first = self.add((None, None), self.run_of("run6", ["111"]))
+        day, changes = self.add(first, self.run_of("run7", ["222"]))
+        self.assertEqual([t["pid"] for t in day["tenders"]], ["111", "222"])
+        self.assertEqual([r["run_id"] for r in day["runs"]], ["run6", "run7"])
+        self.assertEqual(day["run_id"], "run7")
+        self.assertEqual(day["counts"]["tenders"], 2)
+        self.assertEqual({t["pid"]: t["run_id"] for t in day["tenders"]}, {"111": "run6", "222": "run7"})
+        self.assertEqual([t["pid"] for t in changes["tenders"]], ["111", "222"])
+        self.assertEqual(changes["runs"], ["run6", "run7"])
+        self.assertEqual(sum(b["tenders"] for b in day["slice_load"]), 2)
+
+    def test_a_tender_new_this_morning_stays_new_when_read_again(self):
+        first = self.add((None, None), self.run_of("run6", ["111"], status="new"))
+        day, changes = self.add(first, self.run_of("run7", ["111"], status="unchanged"))
+        self.assertEqual(day["tenders"][0]["status"], "new")
+        self.assertEqual(day["tenders"][0]["runs"], ["run6", "run7"])
+        self.assertEqual(changes["counts"], {"new": 1, "tenders": 1})
+        self.assertEqual(changes["tenders"][0]["earlier"][0]["run_id"], "run6")
+
+    def test_a_new_notice_on_a_known_tender_is_still_a_change(self):
+        first = self.add((None, None), self.run_of("run6", ["111"], status="unchanged"))
+        day, changes = self.add(first, self.run_of("run7", ["111"], status="changed"))
+        self.assertEqual(day["tenders"][0]["status"], "changed")
+        self.assertEqual(changes["counts"], {"changed": 1, "tenders": 1})
+        # An unchanged reading is not history worth carrying.
+        self.assertNotIn("earlier", changes["tenders"][0])
+
+    def test_collecting_the_same_run_twice_counts_it_once(self):
+        once = self.add((None, None), self.run_of("run7", ["111"]))
+        day, changes = self.add(once, self.run_of("run7", ["111"]))
+        self.assertEqual([r["run_id"] for r in day["runs"]], ["run7"])
+        self.assertEqual(day["tenders"][0]["runs"], ["run7"])
+        self.assertEqual(day["counts"]["tenders"], 1)
+        self.assertEqual(changes["runs"], ["run7"])
+        self.assertNotIn("earlier", changes["tenders"][0])
+
+    def test_a_target_an_earlier_run_missed_is_settled_by_a_later_one(self):
+        both = ["eis:111", "eis:333"]
+        first = self.add((None, None), self.run_of("run6", ["111"], targets=both))
+        self.assertFalse(first[0]["complete"])
+        day, changes = self.add(first, self.run_of("run7", ["333"], targets=["eis:333"]))
+        self.assertTrue(day["complete"])
+        self.assertEqual(day["coverage"]["unaccounted"], [])
+        self.assertEqual(day["coverage"]["targets"], 2)
+        self.assertTrue(changes["complete"])
+
+    def test_the_latest_run_losing_a_shard_makes_the_date_short(self):
+        first = self.add((None, None), self.run_of("run6", ["111"]))
+        day, changes = self.add(first, self.run_of("run7", ["222"], shards=2, missing=(2,)))
+        self.assertFalse(day["complete"])
+        self.assertFalse(changes["complete"])
+        self.assertEqual(day["shards_missing"], [2])
+        self.assertEqual([t["pid"] for t in day["tenders"]], ["111", "222"])
+
+    def test_a_list_of_another_date_is_never_merged(self):
+        other = self.add((None, None), self.run_of("run6", ["111"]))
+        other[0]["date"] = other[1]["date"] = "2026-08-10"
+        day, changes = self.add(other, self.run_of("run7", ["222"]))
+        self.assertEqual([t["pid"] for t in day["tenders"]], ["222"])
+        self.assertEqual([r["run_id"] for r in day["runs"]], ["run7"])
+        self.assertEqual(changes["runs"], ["run7"])
+
+    def test_a_list_written_before_runs_existed_counts_as_one_run(self):
+        old_day, old_changes = self.run_of("run5", ["111"])
+        for key in ("accounts", "shards_probed"):          # the shape master wrote
+            old_day.pop(key)
+        day, _ = self.add((old_day, old_changes), self.run_of("run7", ["222"]))
+        self.assertEqual([r["run_id"] for r in day["runs"]], ["run5", "run7"])
+        self.assertEqual([t["pid"] for t in day["tenders"]], ["111", "222"])
+
+    def test_walk_answers_an_earlier_run_left_in_a_shard_are_not_merged_again(self):
+        day, _ = self.run_of("run7", ["111"], idprobe=False)
+        self.assertEqual(day["shards_probed"], [])
+        asked = []
+        self.addCleanup(setattr, collect_day, "json_at", collect_day.json_at)
+        collect_day.json_at = lambda drive, path, tok: asked.append(path)
+        collect_day.idspace_after("drive1", "base", "2026-08-11", day["shards_probed"], day, "t")
+        self.assertFalse([p for p in asked if p.endswith("idprobe.json")])
+
+    def test_walk_answers_this_run_carried_are_read(self):
+        day, _ = self.run_of("run7", ["111"], idprobe=True)
+        self.assertEqual(day["shards_probed"], [1])
+
+
+class MainAddsToTheDate(unittest.TestCase):
+    """`main` reads what the date already holds before it writes the date's two lists."""
+
+    def run_main(self, shards, prior):
+        FakeDrive(shards).install(self)
+        inner = collect_day.json_at
+
+        def json_at(drive, path, tok):
+            if path.endswith("/2026-08-11/day.json"):
+                return prior[0]
+            if path.endswith("/2026-08-11/changes.json"):
+                return prior[1]
+            return inner(drive, path, tok)
+
+        collect_day.json_at = json_at
+        uploaded = {}
+        for name, fake in (("env", lambda name: "x"), ("graph_token", lambda: "t"),
+                           ("upload", lambda drive, path, body, tok:
+                            uploaded.__setitem__(path, json.loads(body.decode("utf-8"))))):
+            self.addCleanup(setattr, collect_day, name, getattr(collect_day, name))
+            setattr(collect_day, name, fake)
+        code = collect_day.main(["--date", "2026-08-11", "--shards", "1", "--run-id", "run7",
+                                 "--country", "LV"])
+        return code, uploaded
+
+    def test_the_written_list_holds_the_earlier_run_too(self):
+        FakeDrive({1: {"run_id": "run6", "tenders": [tender("111", [10])]}}).install(self)
+        pair = collect_day.collect("drive1", "base", "2026-08-11", 1, 4, "run6", "t")
+        prior = collect_day.accumulate(None, None, pair[0], pair[1], 4)
+        code, up = self.run_main({1: {"run_id": "run7", "tenders": [tender("222", [20])]}}, prior)
+        self.assertEqual(code, 0)
+        day = next(v for k, v in up.items() if k.endswith("/2026-08-11/day.json"))
+        changes = next(v for k, v in up.items() if k.endswith("/2026-08-11/changes.json"))
+        self.assertEqual([t["pid"] for t in day["tenders"]], ["111", "222"])
+        self.assertEqual(changes["runs"], ["run6", "run7"])
+
+
 if __name__ == "__main__":
     unittest.main()
