@@ -136,7 +136,16 @@ jobs:
   collect:
     needs: shards
     if: always()
-    runs-on: ubuntu-latest
+    # WHERE THE SHARDS RAN. Since 2026-10-23 a run is dispatched every half hour from the
+    # owner's laptop, and the repository is private: on ubuntu-latest this job spent Actions
+    # minutes forty-eight times a day for a few seconds of Python. SHARD_RUNS_ON names the
+    # laptop's runners, which already hold the toolchain; unset, it runs where it always did.
+    runs-on: ${{ fromJSON(vars.SHARD_RUNS_ON || '"ubuntu-latest"') }}
+    # One shell on both kinds of runner, as in eis-shard.yml: a Windows runner otherwise runs
+    # `run:` in PowerShell, and the step below is bash.
+    defaults:
+      run:
+        shell: bash
     steps:
       # Pinned to a full SHA because this repository's Actions policy allows nothing
       # else — the same pin eis-shard.yml uses. A floating tag is a startup failure.
