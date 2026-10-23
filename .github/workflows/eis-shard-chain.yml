@@ -46,9 +46,11 @@ jobs:
       walk_budget: ${{ inputs.walk_budget }}
       walk_hand: ${{ inputs.walk_hand }}
 
+  # A later draw runs only while no earlier one said its shard is done. The output, not the
+  # artifact: on a runner named by SHARD_RUNS_ON no artifact is uploaded at all.
   draw-2:
     needs: draw-1
-    if: always()
+    if: ${{ always() && needs.draw-1.outputs.done != 'true' }}
     uses: ./.github/workflows/eis-shard.yml
     secrets: inherit
     with:
@@ -69,8 +71,8 @@ jobs:
       walk_hand: ${{ inputs.walk_hand }}
 
   draw-3:
-    needs: draw-2
-    if: always()
+    needs: [draw-1, draw-2]
+    if: ${{ always() && needs.draw-1.outputs.done != 'true' && needs.draw-2.outputs.done != 'true' }}
     uses: ./.github/workflows/eis-shard.yml
     secrets: inherit
     with:
