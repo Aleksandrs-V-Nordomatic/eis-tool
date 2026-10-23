@@ -156,6 +156,35 @@ jobs:
           mkdir -p packs
           python3 idwalk.py             --shard ${{ inputs.shard }} --of ${{ inputs.shards }}             ${WALK_BUDGET:+--budget $WALK_BUDGET}             ${WALK_HAND:+--hand $WALK_HAND}             --pause "${{ inputs.pause }}"             --out walked.txt --report packs/idprobe.json > /dev/null
 
+      # WHAT THIS DATE ALREADY HOLDS. Since 2026-10-23 a run of the same date is dispatched
+      # every half hour, and each asks the register for the whole window again. A tender this
+      # date already delivered would be fetched, delivered and recorded again as `unchanged`,
+      # replacing the tender's record for the date, which said `new`. `collect_day.py` keeps the
+      # date's settled notices in its `day.json`; this writes them down for the fetch, which
+      # leaves out a window tender whose every notice is listed. A new notice on a known tender
+      # is not listed, so it is fetched — it is a change. A named list is never cut.
+      #
+      # Its own step, so the Graph secret never enters the fetch's environment. If the date
+      # cannot be read there is no file and the whole window is fetched: the safe direction.
+      - name: What this date already holds
+        id: known
+        if: ${{ steps.go.outputs.go == 'yes' && env.HAVE_GRAPH == 'true' && (inputs.date_from != '' || inputs.date_to != '') }}
+        continue-on-error: true
+        env:
+          HAVE_GRAPH: ${{ secrets.GRAPH_DRIVE_ID != '' }}
+          GRAPH_TENANT_ID: ${{ secrets.GRAPH_TENANT_ID }}
+          GRAPH_CLIENT_ID: ${{ secrets.GRAPH_CLIENT_ID }}
+          GRAPH_CLIENT_SECRET: ${{ secrets.GRAPH_CLIENT_SECRET }}
+          GRAPH_DRIVE_ID: ${{ secrets.GRAPH_DRIVE_ID }}
+          GRAPH_DEST_ROOT: ${{ secrets.GRAPH_DEST_ROOT }}
+          EIS_COUNTRY: ${{ inputs.country }}
+          DATE_FROM: ${{ inputs.date_from }}
+          DATE_TO: ${{ inputs.date_to }}
+          RUN_DATE: ${{ inputs.date }}
+        run: |
+          python3 known.py --from "$DATE_FROM" --to "$DATE_TO" \
+            --date "${RUN_DATE:-$(date -u +%F)}" --out known.txt
+
       - name: Fetch this shard, reading in the gaps
         if: steps.go.outputs.go == 'yes'
         env:
@@ -219,8 +248,15 @@ jobs:
           NAMED=""
           [ -s targets.txt ] && NAMED="--targets targets.txt"
 
+          SKIP=""
+          if [ -f known.txt ]; then
+            SKIP="--skip-notices known.txt"
+          elif [ -n "$WINDOW" ]; then
+            echo "no list of what this date already holds - fetching the whole window"
+          fi
+
           echo "fetching ${NAMED:+the named list }${NAMED:+${WINDOW:+and }}${WINDOW:+the window ${DATE_FROM:-last ${{ inputs.days }} day(s)}${DATE_TO:+ to $DATE_TO}}"
-          python3 batch.py --out packs $ARCH $NAMED $WINDOW \
+          python3 batch.py --out packs $ARCH $NAMED $WINDOW $SKIP \
             --llm-max-files "${{ inputs.llm_max_files }}" \
             --shard ${{ inputs.shard }} --of ${{ inputs.shards }}
 

@@ -86,6 +86,7 @@ def collect(drive, base, date, shards, slices, run_id, tok):
     """Read every shard's delivered index and turn it into one list, and one diff."""
     present, missing, lost, tenders, moves, stale, probed = [], [], [], [], [], [], []
     expected, excused, resolved = set(), set(), {}
+    settled, notices = set(), {}
 
     for n in range(1, shards + 1):
         root = "%s/%s/shards/eis-batch-shard-%d" % (base, date, n)
@@ -117,6 +118,8 @@ def collect(drive, base, date, shards, slices, run_id, tok):
         excused.update(accounts.get("failed") or ())
         excused.update(accounts.get("withdrawn") or ())
         resolved.update(accounts.get("resolved") or {})
+        settled.update(accounts.get("withdrawn") or ())
+        notices.update(accounts.get("notices") or {})
 
         for line in text_at(drive, "%s/failed.txt" % root, tok).splitlines():
             if line.strip():
@@ -189,6 +192,12 @@ def collect(drive, base, date, shards, slices, run_id, tok):
     excused = {named(k) for k in excused}
     unaccounted = sorted(expected - excused - {"eis:%s" % t["pid"] for t in tenders})
 
+    # THE NOTICES THIS RUN SETTLED, for the next run of the date to leave out (`known.py`).
+    # A notice counts once its tender arrived or the portal withdrew it; a failed one is
+    # fetched again on the next run.
+    reached = {"eis:%s" % t["pid"] for t in tenders} | {named(k) for k in settled}
+    remembered = sorted(u for u, k in notices.items() if named(k) in reached)
+
     bins = balance(tenders, slices)
     by_status = {}
     for t in tenders:
@@ -230,6 +239,7 @@ def collect(drive, base, date, shards, slices, run_id, tok):
         # could not name (a uuid nobody resolved) may be named by a later run of the date.
         "accounts": {"expected": sorted(expected), "excused": sorted(excused),
                      "resolved": dict(resolved)},
+        "notices": remembered,
         "shards_expected": shards,
         "shards_present": present,
         "shards_missing": missing,
@@ -367,6 +377,7 @@ def accumulate(prior_day, prior_changes, day, changes, slices):
         day, complete=complete, runs=runs, tenders=tenders, lost=list(lost.values()),
         accounts={"expected": sorted(expected), "excused": sorted(excused),
                   "resolved": resolved},
+        notices=sorted(set(prior_day.get("notices") or []) | set(day.get("notices") or [])),
         coverage={"targets": len(expected), "delivered": len(tenders),
                   "excused": len(expected & excused), "unaccounted": unaccounted},
         counts=dict(by_status, tenders=len(tenders),

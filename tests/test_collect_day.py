@@ -536,5 +536,40 @@ class MainAddsToTheDate(unittest.TestCase):
         self.assertEqual(changes["runs"], ["run6", "run7"])
 
 
+class TheDateRemembersItsNotices(unittest.TestCase):
+    """What a run settled is what the next run of the date leaves out (`known.py`)."""
+
+    def collect(self, index, run_id="run7"):
+        FakeDrive({1: dict(index, run_id=run_id)}).install(self)
+        return collect_day.collect("drive1", "base", "2026-08-11", 1, 4, run_id, "t")
+
+    def index(self, pids, notices, failed=(), withdrawn=()):
+        return {"accounts": {"targets": [], "failed": list(failed), "withdrawn": list(withdrawn),
+                             "notices": notices},
+                "tenders": [tender(p, [10]) for p in pids]}
+
+    def test_a_notice_is_remembered_once_its_tender_arrived(self):
+        day, _ = self.collect(self.index(["111"], {"a1": "eis:111", "b2": "eis:222"}))
+        self.assertEqual(day["notices"], ["a1"])
+
+    def test_a_withdrawn_tender_settles_its_notice_and_a_failed_one_does_not(self):
+        day, _ = self.collect(self.index([], {"w1": "eis:444", "f1": "eis:999"},
+                                         failed=["eis:999"], withdrawn=["eis:444"]))
+        self.assertEqual(day["notices"], ["w1"])
+
+    def test_a_notice_named_by_its_uuid_is_matched_through_what_it_resolved_to(self):
+        index = self.index(["555"], {"d4": "iub:d4"})
+        index["accounts"]["resolved"] = {"iub:d4": "eis:555"}
+        day, _ = self.collect(index)
+        self.assertEqual(day["notices"], ["d4"])
+
+    def test_the_date_keeps_the_notices_of_every_run(self):
+        pair = self.collect(self.index(["111"], {"a1": "eis:111"}), run_id="run6")
+        first = collect_day.accumulate(None, None, pair[0], pair[1], 4)
+        pair = self.collect(self.index(["222"], {"b2": "eis:222"}), run_id="run7")
+        day, _ = collect_day.accumulate(first[0], first[1], pair[0], pair[1], 4)
+        self.assertEqual(day["notices"], ["a1", "b2"])
+
+
 if __name__ == "__main__":
     unittest.main()

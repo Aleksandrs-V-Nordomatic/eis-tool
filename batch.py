@@ -190,7 +190,8 @@ def named_targets(path):
     return [l for l in lines if l]
 
 
-def targets_from(path=None, days=None, date_from=None, date_to=None, no_gate=False):
+def targets_from(path=None, days=None, date_from=None, date_to=None, no_gate=False,
+                 skip=frozenset(), notices=None):
     """(targets, weights, uuids) for the window, the named list, or BOTH.
 
     A caller that wants yesterday's publications *and* a handful of tenders it is already
@@ -203,8 +204,17 @@ def targets_from(path=None, days=None, date_from=None, date_to=None, no_gate=Fal
     nobody knows where, proves nothing about the register either, so it contributes no uuid
     and its packs come back `register_check: unverified`. A tender in both halves keeps the
     discovered version, which is the one that knows its notice.
+
+    WHAT THE DATE ALREADY HOLDS. `skip` is the notice uuids, casefolded, that this run's date
+    already settled (`known.py` reads them; `collect_day.py` keeps them). A window target
+    whose every notice is in it is not fetched again, unless the named list asks for it too:
+    a run every half hour asks for the same window, and fetching a delivered tender again
+    records it `unchanged` over the record that said `new`. A new notice on a known tender
+    keeps it in the list — that is a change. `notices`, when given, is filled with every kept
+    window notice, uuid → target, for the shard's accounts.
     """
     targets, weights, uuids, seen, dropped, unreachable = [], {}, {}, set(), 0, 0
+    found_by = {}
 
     if days is not None or date_from or date_to:
         found = eis_tool.discover(days=days or 1, date_from=date_from, date_to=date_to)
@@ -220,6 +230,7 @@ def targets_from(path=None, days=None, date_from=None, date_to=None, no_gate=Fal
                 if n.get("unreachable") and not outside_scope(n, policy):
                     targets.append(n["uuid"])
                     seen.add("iub:%s" % n["uuid"].casefold())
+                    found_by.setdefault(n["uuid"], set()).add(n["uuid"].casefold())
                     unreachable += 1
                 continue
             if outside_scope(n, policy):
@@ -234,6 +245,7 @@ def targets_from(path=None, days=None, date_from=None, date_to=None, no_gate=Fal
             if n.get("uuid"):
                 uuids[n["eis_url"]] = n["uuid"]
                 seen.add("iub:%s" % n["uuid"].casefold())
+                found_by.setdefault(n["eis_url"], set()).add(n["uuid"].casefold())
         if dropped:
             say("pre-download filter: %d of %d notice(s) matched no recall term - not fetched"
                 % (dropped, dropped + len(targets)))
@@ -241,8 +253,10 @@ def targets_from(path=None, days=None, date_from=None, date_to=None, no_gate=Fal
             say("discovery could not reach the register for %d notice(s) - carried down by "
                 "uuid and asked again below" % unreachable)
 
+    asked_keys = set()
     if path:
         asked = named_targets(path)
+        asked_keys = {identity(t) for t in asked}
         window = set(seen)
         for t in asked:
             key = identity(t)
@@ -255,7 +269,31 @@ def targets_from(path=None, days=None, date_from=None, date_to=None, no_gate=Fal
             say("named list: %d target(s), %d of them already in the window"
                 % (len(asked), overlap))
 
+    if skip:
+        kept, known = [], 0
+        for t in targets:
+            by = found_by.get(t)
+            if by and by <= skip and identity(t) not in asked_keys:
+                known += 1
+                continue
+            kept.append(t)
+        if known:
+            say("already delivered in this date: %d window target(s) whose every notice "
+                "arrived before - not fetched again" % known)
+        targets = kept
+    if notices is not None:
+        for t in targets:
+            for key in found_by.get(t) or ():
+                notices[key] = t
+
     return targets, weights, uuids
+
+
+def skip_from(path):
+    """The notice uuids a window must not fetch again, casefolded; none without a file."""
+    if not path or not os.path.exists(path):
+        return set()
+    return {line.casefold() for line in named_targets(path)}
 
 
 def as_url(target):
@@ -297,7 +335,7 @@ def resolutions(out):
     return found
 
 
-def write_accounts(out, day_targets, failed, withdrawn):
+def write_accounts(out, day_targets, failed, withdrawn, notices=None):
     """What the WHOLE day was asked for, beside what this shard could not deliver of it.
 
     THE SHARD PARTITION IS NOT AS DETERMINISTIC AS IT LOOKS, and this file is how that stops
@@ -331,7 +369,10 @@ def write_accounts(out, day_targets, failed, withdrawn):
             "withdrawn": sorted({key(l.split()[0]) for l in withdrawn if l.split()}),
             # What this shard resolved, so the collector can normalise a uuid that another
             # shard owned and this one only ever saw as a target.
-            "resolved": {k: v for k, v in sorted(seen.items()) if k != v}}
+            "resolved": {k: v for k, v in sorted(seen.items()) if k != v},
+            # Every register notice behind the window, by the tender it reached. The collector
+            # keeps the ones whose tender arrived, and the next run of the date leaves them out.
+            "notices": {u: key(t) for u, t in sorted((notices or {}).items())}}
     with open(os.path.join(out, "accounts.json"), "w", encoding="utf-8") as fh:
         json.dump(body, fh, ensure_ascii=False)
     return body
@@ -461,13 +502,19 @@ def main(argv=None):
                     help="take only the governing documents, not superseded ones")
     ap.add_argument("--no-policy-gate", "--no-cpv-gate", dest="no_gate", action="store_true",
                     help="ignore EIS_POLICY and fetch every discovered notice")
+    ap.add_argument("--skip-notices", help="file of IUB notice uuids this date already "
+                    "settled; the window leaves out a tender whose every notice is in it, "
+                    "a named list never")
     args = ap.parse_args(argv)
 
     if not args.targets and args.days is None and not (args.date_from or args.date_to):
         ap.error("give --targets, or --days/--from to discover, or both")
     try:
+        notices = {}
         targets, weights, uuids = targets_from(args.targets, args.days, args.date_from,
-                                               args.date_to, args.no_gate)
+                                               args.date_to, args.no_gate,
+                                               skip=skip_from(args.skip_notices),
+                                               notices=notices)
     except (RuntimeError, net.Unreachable) as exc:
         # Two refusals, one exit. `RuntimeError` is discovery declining to ship a window it
         # cannot prove; `net.Unreachable` is the register never answering at all. Both mean
@@ -494,7 +541,7 @@ def main(argv=None):
                                   uuids=uuids)
     # The WHOLE day's targets, not this shard's slice — `whole_list` is the list before it
     # was split, which is exactly what a reader needs to tell a short day from a full one.
-    write_accounts(args.out, whole_list, failed, withdrawn)
+    write_accounts(args.out, whole_list, failed, withdrawn, notices=notices)
     # A tender that could not be fetched is recorded, not fatal: the run still delivered
     # everything else, and a caller that treated this as total failure would throw it away.
     # A tender EIS itself says has nothing to show is weaker still: `failed` alone decides

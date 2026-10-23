@@ -479,5 +479,64 @@ class ShardsOutsideTheRequest(unittest.TestCase):
         self.assertEqual(len(seen), len(set(seen)))
 
 
+class KnownNotices(unittest.TestCase):
+    """A run every half hour asks for the same window again; what the date already holds is
+    not fetched again, and a new notice on a known tender is — that is a change."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="eis_known_")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.addCleanup(setattr, batch.eis_tool, "discover", batch.eis_tool.discover)
+
+    def url(self, pid):
+        return "https://www.eis.gov.lv/EKEIS/Supplier/Procurement/%s" % pid
+
+    def discovers(self, *pairs):
+        batch.eis_tool.discover = lambda **kw: {"notices": [
+            {"eis_url": self.url(pid), "uuid": uuid, "title": "Tender %s" % pid, "cpv": None}
+            for pid, uuid in pairs]}
+
+    def named(self, *lines):
+        path = os.path.join(self.dir, "t.txt")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(lines) + "\n")
+        return path
+
+    def test_a_tender_whose_every_notice_arrived_is_not_fetched_again(self):
+        self.discovers(("1", "A1"), ("2", "B2"))
+        targets, _w, _u = batch.targets_from(days=1, skip={"a1"})
+        self.assertEqual(targets, [self.url("2")])
+
+    def test_a_new_notice_on_a_known_tender_is_fetched(self):
+        self.discovers(("1", "A1"), ("1", "C3"))
+        targets, _w, _u = batch.targets_from(days=1, skip={"a1"})
+        self.assertEqual(set(targets), {self.url("1")})
+
+    def test_a_named_target_is_never_left_out(self):
+        self.discovers(("1", "A1"))
+        targets, _w, uuids = batch.targets_from(self.named("1"), days=1, skip={"a1"})
+        self.assertEqual(targets, [self.url("1")])
+        self.assertEqual(uuids[self.url("1")], "A1")       # the discovered one, with its notice
+
+    def test_the_kept_notices_are_handed_back_for_the_accounts(self):
+        self.discovers(("1", "A1"), ("2", "B2"))
+        notices = {}
+        batch.targets_from(days=1, skip={"a1"}, notices=notices)
+        self.assertEqual(notices, {"b2": self.url("2")})
+
+    def test_the_skip_file_is_read_casefolded_and_absent_means_nothing(self):
+        path = self.named("\ufeffA1", "# a comment", "", "b2")
+        self.assertEqual(batch.skip_from(path), {"a1", "b2"})
+        self.assertEqual(batch.skip_from(os.path.join(self.dir, "none.txt")), set())
+        self.assertEqual(batch.skip_from(None), set())
+
+    def test_the_accounts_name_each_notice_by_the_tender_it_reached(self):
+        with open(os.path.join(self.dir, "resolved.tsv"), "w", encoding="utf-8") as fh:
+            fh.write("d4e5\t555\n")
+        body = batch.write_accounts(self.dir, [self.url("111"), "d4e5"], [], [],
+                                    notices={"a1": self.url("111"), "d4e5": "d4e5"})
+        self.assertEqual(body["notices"], {"a1": "eis:111", "d4e5": "eis:555"})
+
+
 if __name__ == "__main__":
     unittest.main()
