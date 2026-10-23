@@ -386,9 +386,11 @@ class TheDateAccumulates(unittest.TestCase):
     last half hour; the reader would see one day folder that had forgotten the morning.
     """
 
-    def run_of(self, run_id, pids, status="new", targets=(), shards=1, missing=(), idprobe=False):
+    def run_of(self, run_id, pids, status="new", targets=(), shards=1, missing=(), idprobe=False,
+               resolved=None):
         index = {"run_id": run_id, "idprobe": idprobe,
-                 "accounts": {"targets": list(targets), "failed": [], "withdrawn": []},
+                 "accounts": {"targets": list(targets), "failed": [], "withdrawn": [],
+                              "resolved": resolved or {}},
                  "tenders": [tender(p, [10], status=status) for p in pids]}
         layout = {n: (index if n == 1 else {"run_id": run_id, "tenders": []})
                   for n in range(1, shards + 1) if n not in missing}
@@ -444,6 +446,20 @@ class TheDateAccumulates(unittest.TestCase):
         self.assertEqual(day["coverage"]["unaccounted"], [])
         self.assertEqual(day["coverage"]["targets"], 2)
         self.assertTrue(changes["complete"])
+
+    def test_a_uuid_no_run_resolved_is_settled_when_a_later_run_resolves_it(self):
+        first = self.add((None, None), self.run_of("run6", ["111"], targets=["eis:111", "iub:u-1"]))
+        self.assertEqual(first[0]["coverage"]["unaccounted"], ["iub:u-1"])
+        day, changes = self.add(first, self.run_of("run7", ["333"], targets=["iub:u-1"],
+                                                   resolved={"iub:u-1": "eis:333"}))
+        self.assertEqual(day["coverage"]["unaccounted"], [])
+        self.assertEqual(day["coverage"]["targets"], 2)
+        self.assertTrue(day["complete"])
+        self.assertTrue(changes["complete"])
+        # The map is kept, so a run after that one still reads the stored uuid correctly.
+        later, _ = self.add((day, changes), self.run_of("run8", ["111"], targets=["eis:111"]))
+        self.assertEqual(later["coverage"]["unaccounted"], [])
+        self.assertTrue(later["complete"])
 
     def test_the_latest_run_losing_a_shard_makes_the_date_short(self):
         first = self.add((None, None), self.run_of("run6", ["111"]))

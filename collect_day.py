@@ -226,8 +226,10 @@ def collect(drive, base, date, shards, slices, run_id, tok):
         "coverage": {"targets": len(expected), "delivered": len(tenders),
                      "excused": len(expected & excused), "unaccounted": unaccounted},
         # The sets behind the coverage, so a later run of this date can add to them rather
-        # than start again — see `accumulate`.
-        "accounts": {"expected": sorted(expected), "excused": sorted(excused)},
+        # than start again — see `accumulate`. `resolved` rides along because a target one run
+        # could not name (a uuid nobody resolved) may be named by a later run of the date.
+        "accounts": {"expected": sorted(expected), "excused": sorted(excused),
+                     "resolved": dict(resolved)},
         "shards_expected": shards,
         "shards_present": present,
         "shards_missing": missing,
@@ -336,8 +338,14 @@ def accumulate(prior_day, prior_changes, day, changes, slices):
         # A list from before `accounts`: what it could not account for is still owed.
         owed = {"expected": (prior_day.get("coverage") or {}).get("unaccounted") or [],
                 "excused": []}
-    expected = set(owed.get("expected") or []) | set(day["accounts"]["expected"])
-    excused = set(owed.get("excused") or []) | set(day["accounts"]["excused"])
+    # A target an earlier run could only name by its uuid is stored under that name; a later
+    # run that fetched it publishes what it resolved to. Normalising the union with the
+    # union of those maps keeps one unresolved uuid from holding the date short until it rolls.
+    resolved = dict(owed.get("resolved") or {})
+    resolved.update(day["accounts"].get("resolved") or {})
+    named = lambda k: resolved.get(k, k)
+    expected = {named(k) for k in set(owed.get("expected") or []) | set(day["accounts"]["expected"])}
+    excused = {named(k) for k in set(owed.get("excused") or []) | set(day["accounts"]["excused"])}
     arrived = {"eis:%s" % t["pid"] for t in tenders}
     unaccounted = sorted(expected - excused - arrived)
     # Whole means every target any run of the date named reached it or was settled, and the
@@ -357,7 +365,8 @@ def accumulate(prior_day, prior_changes, day, changes, slices):
 
     merged_day = dict(
         day, complete=complete, runs=runs, tenders=tenders, lost=list(lost.values()),
-        accounts={"expected": sorted(expected), "excused": sorted(excused)},
+        accounts={"expected": sorted(expected), "excused": sorted(excused),
+                  "resolved": resolved},
         coverage={"targets": len(expected), "delivered": len(tenders),
                   "excused": len(expected & excused), "unaccounted": unaccounted},
         counts=dict(by_status, tenders=len(tenders),
