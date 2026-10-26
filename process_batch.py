@@ -202,7 +202,7 @@ def process(drive, base, batch_id, run_id, work):
         return 2
     say("batch %s complete: %d tenders" % (batch_id, len(manifest["tenders"])))
 
-    date = manifest["window"]["to"]
+    date = manifest.get("date") or manifest["window"]["to"][:10]
     published, failed, moves, entries = [], [], [], []
     for tender in manifest["tenders"]:
         if tender["status"] != "downloaded":

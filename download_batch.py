@@ -3,7 +3,7 @@
     python download_batch.py               the daily run
     python download_batch.py --since 2026-10-20
 
-It lists the notices published since the last handed-over batch, keeps those the recall
+It lists the notices published since the last handed-over batch listed the register, keeps those the recall
 policy lets through and the tenders on the watch list, selects and downloads their documents,
 uploads the batch to the staging folder of the library and starts the processing workflow.
 It converts, judges and publishes nothing. An interrupted batch is resumed by the next run.
@@ -40,12 +40,32 @@ MAX_NESTING = 3
 OPEN = ("downloading", "uploaded", "failed")
 
 
-def riga_today():
+def riga():
     try:
         from zoneinfo import ZoneInfo
-        return dt.datetime.now(ZoneInfo("Europe/Riga")).date()
+        return ZoneInfo("Europe/Riga")
     except Exception:
-        return (dt.datetime.utcnow() + dt.timedelta(hours=2)).date()
+        return dt.timezone(dt.timedelta(hours=2))
+
+
+def now_utc():
+    return dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+
+
+def riga_today():
+    return now_utc().astimezone(riga()).date()
+
+
+def moment(text):
+    """An ISO timestamp as an aware datetime; a bare date is midnight of that day in Riga."""
+    if len(text) == 10:
+        return dt.datetime.combine(dt.date.fromisoformat(text), dt.time(), riga())
+    value = dt.datetime.fromisoformat(text.replace("Z", "+00:00"))
+    return value if value.tzinfo else value.replace(tzinfo=dt.timezone.utc)
+
+
+def stamp(value):
+    return value.astimezone(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def load_json(path, default=None):
@@ -215,19 +235,24 @@ class Downloader:
         return out
 
     def last_window_end(self):
-        """The end of the newest handed-over window, here or in the library."""
-        ends = [s["window"]["to"] for _, s in self.batches()
+        """The moment the newest handed-over batch listed the register, here or in the library."""
+        ends = [moment(s["window"]["to"]) for _, s in self.batches()
                 if s.get("status") in ("processing_requested", "complete")]
         names = [n for n in self.library.list_names(self.work + "/batches")
                  if n.startswith(self.country + "-")]
         for name in sorted(names, reverse=True)[:3]:
             record = self.library.read_text("%s/batches/%s/complete.json" % (self.work, name))
             try:
-                ends.append(json.loads(record)["window"]["to"])
+                ends.append(moment(json.loads(record)["window"]["to"]))
                 break
             except (ValueError, KeyError, TypeError):
                 continue
         return max(ends) if ends else None
+
+    def started_today(self):
+        today = riga_today()
+        return any(moment(s["created"]).astimezone(riga()).date() == today
+                   for _, s in self.batches())
 
     def next_id(self, today):
         prefix = "%s-%s-" % (self.country, today.strftime("%Y%m%d"))
@@ -245,11 +270,15 @@ class Downloader:
 
     # ---------------------------------------------------------------- listing
     def list_new(self, window_from, window_to):
-        """The tenders of a new batch: notices of the window through the gate, plus the watch list."""
-        raw, coverage = harvest.fetch_window(window_from, window_to)
+        """The tenders of a new batch: notices published after `window_from` and up to
+        `window_to` that pass the recall gate, plus the watch list."""
+        raw, coverage = harvest.fetch_window(window_from.astimezone(riga()).date(),
+                                             window_to.astimezone(riga()).date())
         if not coverage["proven"]:
             raise RuntimeError("the register gave %d of %d notices" % (coverage["unique"],
                                                                         coverage["expected"]))
+        raw = [r for r in raw if r.get("publicationDate")
+               and window_from < moment(r["publicationDate"]) <= window_to]
         notices = [harvest.normalise(r) for r in raw if r.get("type") in harvest.BIDDABLE]
         kept = [n for n in notices if not policy.outside_scope(n, self.policy)]
         self.log("register: %d notices, %d biddable, %d through the recall gate"
@@ -494,7 +523,8 @@ class Downloader:
                             "procurement": selected.get("procurement"),
                             "records": selected.get("records", []), "files": files})
         return {"schema": "batch-manifest/1", "batch_id": batch_id, "country": self.country,
-                "window": state["window"], "created": state["created"], "tenders": tenders}
+                "window": state["window"], "date": state["date"], "created": state["created"],
+                "tenders": tenders}
 
     def upload(self, batch_id, state):
         inbox = "%s/inbox/%s" % (self.work, batch_id)
@@ -553,27 +583,32 @@ class Downloader:
         self.save(batch_id, state)
         return True
 
-    def plan(self, since=None):
-        """A new batch for the window after the last handed-over one, or None."""
-        today = riga_today()
-        yesterday = today - dt.timedelta(days=1)
-        last = self.last_window_end()
-        start = dt.date.fromisoformat(since) if since else (
-            dt.date.fromisoformat(last) + dt.timedelta(days=1) if last else yesterday)
-        if start > yesterday:
+    def plan(self, since=None, now=False):
+        """A new batch from the moment the last batch listed the register to this moment.
+
+        A scheduled run starts at most one batch a day; `now` (the desktop shortcut) starts
+        one whenever it is pressed.
+        """
+        if not now and not since and self.started_today():
             return None, None
-        batch_id = self.next_id(today)
+        end = now_utc()
+        last = self.last_window_end()
+        start = moment(since) if since else (last or end - dt.timedelta(days=1))
+        if start >= end:
+            return None, None
+        batch_id = self.next_id(riga_today())
         os.makedirs(self.folder(batch_id), exist_ok=True)
         self.log = Log(os.path.join(self.folder(batch_id), "log.txt"))
-        self.log("window %s to %s" % (start, yesterday))
+        self.log("window %s to %s" % (stamp(start), stamp(end)))
         state = {"batch_id": batch_id, "country": self.country, "status": "downloading",
-                 "window": {"from": start.isoformat(), "to": yesterday.isoformat()},
-                 "created": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                 "tenders": self.list_new(start, yesterday)}
+                 "window": {"from": stamp(start), "to": stamp(end)},
+                 "date": end.astimezone(riga()).date().isoformat(),
+                 "created": stamp(end),
+                 "tenders": self.list_new(start, end)}
         self.save(batch_id, state)
         return batch_id, state
 
-    def run(self, since=None):
+    def run(self, since=None, now=False):
         self.read_rules()
         results = []
         for batch_id, state in self.batches():
@@ -583,7 +618,7 @@ class Downloader:
                 results.append((batch_id, self.run_batch(batch_id, state)))
                 if results[-1][1] != "handed over":
                     return results
-        batch_id, state = self.plan(since)
+        batch_id, state = self.plan(since, now)
         if batch_id:
             results.append((batch_id, self.run_batch(batch_id, state)))
         return results
@@ -591,7 +626,9 @@ class Downloader:
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Download one daily batch of tenders.")
-    ap.add_argument("--since", help="first publication date of a new batch, YYYY-MM-DD")
+    ap.add_argument("--since", help="start of a new batch's window, YYYY-MM-DD or an ISO timestamp")
+    ap.add_argument("--now", action="store_true",
+                    help="start a new batch even if one was started today")
     ap.add_argument("--settings", default=SETTINGS)
     args = ap.parse_args(argv)
     for stream in (sys.stdout, sys.stderr):
@@ -609,11 +646,11 @@ def main(argv=None):
         downloader = Downloader(settings, library=gateway_mod.Gateway(settings.get("gateway_url")),
                                 monday_token=secret("monday", "MONDAY_TOKEN"),
                                 github_token=secret("github", "GITHUB_TOKEN"))
-        results = downloader.run(args.since)
+        results = downloader.run(args.since, args.now)
         for batch_id, result in results:
             print("%s: %s" % (batch_id, result))
         if not results:
-            print("nothing new: the last batch covers yesterday")
+            print("nothing to do: today's batch is already handed over")
         return 0 if all(r == "handed over" for _, r in results) else 1
     except gateway_mod.SignInNeeded as exc:
         notify("Tender batch not started", "Sign in to the SharePoint gateway: %s" % exc)

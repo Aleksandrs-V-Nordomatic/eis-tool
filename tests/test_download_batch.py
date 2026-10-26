@@ -12,7 +12,7 @@ import harvest
 import watchlist
 
 FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures")
-TODAY = dt.date(2026, 10, 26)
+NOW = dt.datetime(2026, 10, 26, 8, 0, tzinfo=dt.timezone.utc)
 
 
 class Library:
@@ -106,7 +106,7 @@ class Run(unittest.TestCase):
                 "board": 1, "key_column": "k", "decision_column": "d", "deal_column": "r",
                 "watched_decisions": ["New"], "closed_deal_groups": ["Rejected"]}),
             "p/work/LV/batches/LV-20261024-0001/complete.json": json.dumps(
-                {"window": {"from": "2026-10-23", "to": "2026-10-23"}}),
+                {"window": {"from": "2026-10-23T09:00:00Z", "to": "2026-10-24T09:30:00Z"}}),
         })
         settings = {"country": "LV", "batches": self.root, "library_project": "p", "kit": "kit/LV",
                     "github_repo": "o/r"}
@@ -114,7 +114,7 @@ class Run(unittest.TestCase):
                                             github_token="g")
         self.dispatched = []
         self.dl.dispatch = self._dispatch
-        self.patch(download_batch, "riga_today", lambda: TODAY)
+        self.patch(download_batch, "now_utc", lambda: NOW)
         self.patch(eis_fetch, "Tender", FakeTender)
         self.patch(eis_fetch, "pause_for", lambda b: 0)
         self.patch(download_batch, "notify", lambda *a: None)
@@ -132,10 +132,15 @@ class Run(unittest.TestCase):
 
     def _window(self, start, end):
         self.windows.append((start, end))
-        raw = [{"identifier": "u-100", "name": "Ēkas pārbūve", "type": "competition"},
-               {"identifier": "u-200", "name": "Stāvvietas izbūve", "type": "competition"},
-               {"identifier": "u-999", "name": "Rezultāts", "type": "result"}]
-        return raw, {"proven": True, "unique": 3, "expected": 3}
+        raw = [{"identifier": "u-100", "name": "Ēkas pārbūve", "type": "competition",
+                "publicationDate": "2026-10-25T12:00:00+03:00"},
+               {"identifier": "u-200", "name": "Stāvvietas izbūve", "type": "competition",
+                "publicationDate": "2026-10-25T12:00:00+03:00"},
+               {"identifier": "u-400", "name": "Ēkas pārbūve agrāk", "type": "competition",
+                "publicationDate": "2026-10-24T12:00:00+03:00"},
+               {"identifier": "u-999", "name": "Rezultāts", "type": "result",
+                "publicationDate": "2026-10-25T12:00:00+03:00"}]
+        return raw, {"proven": True, "unique": 4, "expected": 4}
 
     def _dispatch(self, batch_id, state):
         self.dispatched.append(batch_id)
@@ -148,10 +153,19 @@ class Run(unittest.TestCase):
     def manifest(self, batch_id):
         return json.loads(self.library.files["p/work/LV/inbox/%s/manifest.json" % batch_id])
 
-    def test_the_window_starts_after_the_last_handed_over_batch_and_ends_yesterday(self):
+    def test_the_window_runs_from_the_last_listing_to_this_moment(self):
         results = self.dl.run()
-        self.assertEqual(self.windows, [(dt.date(2026, 10, 24), dt.date(2026, 10, 25))])
+        self.assertEqual(self.windows, [(dt.date(2026, 10, 24), dt.date(2026, 10, 26))])
         self.assertEqual(results, [("LV-20261026-0001", "handed over")])
+        manifest = self.manifest("LV-20261026-0001")
+        self.assertEqual(manifest["window"], {"from": "2026-10-24T09:30:00Z",
+                                              "to": "2026-10-26T08:00:00Z"})
+        self.assertEqual(manifest["date"], "2026-10-26")
+
+    def test_a_notice_published_before_the_last_listing_is_not_taken_again(self):
+        self.dl.run()
+        pids = [t["pid"] for t in self.manifest("LV-20261026-0001")["tenders"]]
+        self.assertNotIn("400", pids)
 
     def test_the_gate_drops_by_title_and_the_watch_list_is_added(self):
         self.dl.run()
@@ -215,9 +229,17 @@ class Run(unittest.TestCase):
         tenders = {t["pid"]: t for t in self.manifest("LV-20261026-0001")["tenders"]}
         self.assertEqual(tenders["300"]["status"], "failed")
 
-    def test_a_day_already_covered_plans_nothing(self):
+    def test_a_scheduled_run_starts_one_batch_a_day(self):
         self.dl.run()
         self.assertEqual(self.dl.run(), [])
+
+    def test_the_shortcut_starts_a_batch_whenever_it_is_pressed(self):
+        self.dl.run()
+        later = NOW + dt.timedelta(hours=3)
+        self.patch(download_batch, "now_utc", lambda: later)
+        results = self.dl.run(now=True)
+        self.assertEqual(results, [("LV-20261026-0002", "handed over")])
+        self.assertEqual(self.manifest("LV-20261026-0002")["window"]["from"], "2026-10-26T08:00:00Z")
 
     def test_a_handed_over_batch_without_a_completion_record_is_sent_again(self):
         self.dl.run()
@@ -231,7 +253,7 @@ class Run(unittest.TestCase):
     def test_a_completion_record_closes_the_batch(self):
         self.dl.run()
         self.library.files["p/work/LV/batches/LV-20261026-0001/complete.json"] = json.dumps(
-            {"window": {"from": "2026-10-24", "to": "2026-10-25"}})
+            {"window": {"from": "2026-10-24T09:30:00Z", "to": "2026-10-26T08:00:00Z"}})
         self.dl.run()
         state = download_batch.load_json(os.path.join(self.root, "LV-20261026-0001", "state.json"))
         self.assertEqual(state["status"], "complete")

@@ -95,7 +95,7 @@ Register-ScheduledTask -TaskName "Tender Radar LV download" -Action $action -Tri
 $shell = New-Object -ComObject WScript.Shell
 $link = $shell.CreateShortcut((Join-Path ([Environment]::GetFolderPath("Desktop")) "Tender Radar LV.lnk"))
 $link.TargetPath = "powershell.exe"
-$link.Arguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$run`""
+$link.Arguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$run`" -Now"
 $link.Description = "Download today's batch of Latvian tenders now"
 $link.Save()
 

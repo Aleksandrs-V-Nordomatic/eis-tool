@@ -38,8 +38,7 @@ batch.
   batches/<batch id>/complete.json   written last; its presence means the batch is ready
 ```
 
-`<date>` is the last publication date of the batch's window. A batch id is
-`<CC>-<yyyymmdd>-<nnnn>`.
+`<date>` is the Riga date the batch was listed on. A batch id is `<CC>-<yyyymmdd>-<nnnn>`.
 
 ### A tender's index
 
@@ -63,15 +62,15 @@ language is compared only on the fields that do not depend on it.
 | Lock, so one batch runs at a time | `download_batch.Lock` |
 | Read the three kit files through the SharePoint gateway | `gateway.py` |
 | Resume an open batch; a handed-over batch with no completion record after 6 hours is uploaded and started again | `Downloader.run`, `recheck` |
-| Window: from the day after the last handed-over window to yesterday, Riga time | `Downloader.plan` |
+| Window: from the moment the last handed-over batch listed the register to this run; the scheduled task starts at most one batch a day, the desktop shortcut starts one at once | `Downloader.plan` |
 | Notices of the window, the recall gate, the watch list | `harvest.py`, `policy.py`, `watchlist.py` |
 | Each tender: read the page, list the files of each current record, decide each file, download the kept ones (`.part`, size check, sha256) | `eis_fetch.Tender`, `selection.py` |
 | An archive with skipped members: its kept members travel on their own | `archives.py` |
 | Upload the kept files, then `manifest.json`; each counts when the library returns an eTag | `Downloader.upload` |
 | Start `process-batch.yml` with the batch id | `Downloader.dispatch` |
 
-A tender that fails is tried again by the next run; after three runs it is handed over as
-failed. Records of the archive section (replaced versions) are listed by title and not opened.
+A tender that fails is tried again by the next run; after three failed runs in a row it is
+handed over as failed. Records of the archive section (replaced versions) are listed by title and not opened.
 Windows notifications report the start, the end and every failure; the batch log is in
 `<batches>/<batch id>/log.txt`.
 
@@ -90,8 +89,8 @@ the Windows Credential Manager, opens the browser once to sign in to the SharePo
 registers the task **Tender Radar LV download** (daily at 10:00 and at sign-in) and puts the
 shortcut **Tender Radar LV** on the desktop. Each run updates the clone from `master` first.
 
-Run one batch by hand: `python download_batch.py`, or `--since YYYY-MM-DD` for a first batch
-that should start earlier than yesterday.
+Run one batch by hand: `python download_batch.py --now`, or `--since YYYY-MM-DD` for a first
+batch that should start at a given day.
 
 ## The workflow
 
