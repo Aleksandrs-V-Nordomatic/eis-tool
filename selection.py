@@ -33,7 +33,8 @@ def fold(text):
 
 
 def extension(name):
-    return os.path.splitext(name or "")[1].lower().lstrip(".")
+    """The extension, also of a name EIS closes with a bracket: "Pielikums (01_EKA_1.zip)"."""
+    return os.path.splitext((name or "").rstrip(")"))[1].lower().lstrip(".")
 
 
 class Rules:
