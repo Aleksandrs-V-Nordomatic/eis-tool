@@ -5,11 +5,12 @@
 
 It lists the notices published since the last handed-over batch listed the register, keeps those the recall
 policy lets through and the tenders on the watch list, selects and downloads their documents,
-uploads the batch to the staging folder of the library and starts the processing workflow.
+copies the batch into the staging folder of the library as OneDrive syncs it to this computer,
+waits until OneDrive has carried every file to SharePoint and starts the processing workflow.
 It converts, judges and publishes nothing. An interrupted batch is resumed by the next run.
 
 Settings: %USERPROFILE%\\.eis-tool\\downloader.json (written by setup/install.ps1).
-Credentials: Windows Credential Manager (gateway sign-in, monday.com token, GitHub token).
+Credentials: Windows Credential Manager (monday.com token, GitHub token).
 """
 
 import argparse
@@ -27,10 +28,10 @@ import urllib.request
 
 import archives
 import eis_fetch
-import gateway as gateway_mod
 import harvest
 import policy
 import selection
+import synced
 import watchlist
 
 SETTINGS = os.path.join(os.path.expanduser("~"), ".eis-tool", "downloader.json")
@@ -39,6 +40,9 @@ MAX_ATTEMPTS = 3
 # SharePoint rewrites the Office files it receives, so their size and hash change; under this
 # suffix the inbox keeps the bytes that were downloaded. The manifest names each file's inbox name.
 INBOX_SUFFIX = ".bin"
+# How long a run waits for OneDrive to carry a copied batch to SharePoint, and how often it looks.
+SYNC_WAIT = 2 * 3600
+SYNC_PAUSE = 20
 MAX_NESTING = 3
 OPEN = ("downloading", "uploaded", "failed")
 
@@ -490,12 +494,17 @@ class Downloader:
             try:
                 self.upload(batch_id, state)
             except Exception as exc:
-                self.log("upload interrupted: %s" % exc)
-                notify("Tender batch %s: upload failed" % batch_id,
-                       "It is uploaded again at the next run. Log: %s"
+                self.log("copy interrupted: %s" % exc)
+                notify("Tender batch %s: copy to the library failed" % batch_id,
+                       "It is copied again at the next run. Log: %s"
                        % os.path.join(folder, "log.txt"))
-                return "upload interrupted"
+                return "copy interrupted"
         if state["status"] in ("uploaded", "failed"):
+            if not self.wait_for_sync(batch_id, state):
+                notify("Tender batch %s: OneDrive is still uploading" % batch_id,
+                       "Processing starts at the next run. Log: %s"
+                       % os.path.join(folder, "log.txt"))
+                return "waiting for OneDrive"
             if not self.dispatch(batch_id, state):
                 notify("Tender batch %s: processing not started" % batch_id,
                        "It is started again at the next run. Log: %s"
@@ -542,15 +551,34 @@ class Downloader:
                     continue
                 local = os.path.join(self.folder(batch_id), "tenders", tender["pid"], "files",
                                      f["stored"].split("/", 1)[1])
-                uploaded[f["inbox"]] = self.library.upload("%s/%s" % (inbox, f["inbox"]), local,
-                                                           replace=True)
+                uploaded[f["inbox"]] = self.library.upload("%s/%s" % (inbox, f["inbox"]), local)
                 self.save(batch_id, state)
         path = os.path.join(self.folder(batch_id), "manifest.json")
         save_json(path, manifest)
         self.library.upload(inbox + "/manifest.json", path, replace=True)
         state["status"] = "uploaded"
         self.save(batch_id, state)
-        self.log("uploaded %d files and the manifest to %s" % (len(uploaded), inbox))
+        self.log("copied %d files and the manifest to %s" % (len(uploaded), inbox))
+
+    def wait_for_sync(self, batch_id, state):
+        """True once OneDrive has carried every file of the batch and its manifest."""
+        inbox = "%s/inbox/%s" % (self.work, batch_id)
+        manifest = load_json(os.path.join(self.folder(batch_id), "manifest.json"), {})
+        paths = ["%s/%s" % (inbox, f["inbox"]) for t in manifest.get("tenders", [])
+                 for f in t.get("files", []) if f.get("inbox")]
+        paths.append(inbox + "/manifest.json")
+        deadline = time.monotonic() + SYNC_WAIT
+        while True:
+            waiting = self.library.not_in_sync(paths)
+            if not waiting:
+                self.log("OneDrive has carried all %d files to the library" % len(paths))
+                return True
+            if time.monotonic() >= deadline:
+                self.log("OneDrive has not carried %d of %d files yet, e.g. %s"
+                         % (len(waiting), len(paths), waiting[0]))
+                return False
+            paths = waiting
+            time.sleep(SYNC_PAUSE)
 
     def dispatch(self, batch_id, state):
         repo = self.settings["github_repo"]
@@ -649,7 +677,12 @@ def main(argv=None):
         print("another batch is running; this run is skipped")
         return 0
     try:
-        downloader = Downloader(settings, library=gateway_mod.Gateway(settings.get("gateway_url")),
+        if not os.path.isdir(os.path.join(settings["library_root"], *settings["library_project"].split("/"))):
+            notify("Tender batch not started", "The synced library folder is not on this computer")
+            print("the synced library folder %s does not hold %s: is OneDrive syncing it?"
+                  % (settings["library_root"], settings["library_project"]), file=sys.stderr)
+            return 3
+        downloader = Downloader(settings, library=synced.Library(settings["library_root"]),
                                 monday_token=secret("monday", "MONDAY_TOKEN"),
                                 github_token=secret("github", "GITHUB_TOKEN"))
         results = downloader.run(args.since, args.now)
@@ -658,10 +691,6 @@ def main(argv=None):
         if not results:
             print("nothing to do: today's batch is already handed over")
         return 0 if all(r == "handed over" for _, r in results) else 1
-    except gateway_mod.SignInNeeded as exc:
-        notify("Tender batch not started", "Sign in to the SharePoint gateway: %s" % exc)
-        print("sign-in needed: %s" % exc, file=sys.stderr)
-        return 3
     except Exception as exc:
         notify("Tender batch failed", str(exc)[:200])
         traceback.print_exc()

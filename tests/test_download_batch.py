@@ -16,11 +16,12 @@ NOW = dt.datetime(2026, 10, 26, 8, 0, tzinfo=dt.timezone.utc)
 
 
 class Library:
-    """The library, as the downloader sees it through the gateway."""
+    """The library, as the downloader sees it in the folder OneDrive syncs."""
 
     def __init__(self, files=None):
         self.files = dict(files or {})
         self.uploads = []
+        self.unsynced = set()
 
     def read_text(self, path):
         return self.files.get(path)
@@ -33,7 +34,10 @@ class Library:
         with open(local, "rb") as fh:
             self.files[path] = fh.read()
         self.uploads.append(path)
-        return "etag-%d" % len(self.uploads)
+        return len(self.files[path])
+
+    def not_in_sync(self, paths):
+        return [p for p in paths if p not in self.files or p in self.unsynced]
 
 
 def make_zip(path, members):
@@ -118,6 +122,7 @@ class Run(unittest.TestCase):
         self.patch(eis_fetch, "Tender", FakeTender)
         self.patch(eis_fetch, "pause_for", lambda b: 0)
         self.patch(download_batch, "notify", lambda *a: None)
+        self.patch(download_batch, "SYNC_WAIT", 0)
         self.patch(harvest, "fetch_window", self._window)
         self.patch(harvest, "resolve", lambda uuid: "https://www.eis.gov.lv/EKEIS/Supplier/Procurement/%s"
                    % uuid.split("-")[1])
@@ -230,6 +235,28 @@ class Run(unittest.TestCase):
         self.assertEqual(results, [("LV-20261026-0001", "handed over")])
         tenders = {t["pid"]: t for t in self.manifest("LV-20261026-0001")["tenders"]}
         self.assertEqual(tenders["300"]["status"], "failed")
+
+    def test_processing_starts_only_when_onedrive_has_carried_every_file(self):
+        self.library.unsynced = {"p/work/LV/inbox/LV-20261026-0001/manifest.json"}
+        self.assertEqual(self.dl.run(), [("LV-20261026-0001", "waiting for OneDrive")])
+        self.assertEqual(self.dispatched, [])
+        uploads = len(self.library.uploads)
+        self.library.unsynced = set()
+        self.assertEqual(self.dl.run(), [("LV-20261026-0001", "handed over")])
+        self.assertEqual(self.dispatched, ["LV-20261026-0001"])
+        self.assertEqual(len(self.library.uploads), uploads)
+
+    def test_every_kept_file_is_waited_for(self):
+        self.dl.run()
+        manifest = self.manifest("LV-20261026-0001")
+        kept = [f["inbox"] for t in manifest["tenders"] for f in t["files"] if f.get("inbox")]
+        self.assertTrue(kept)
+        self.library.unsynced = {"p/work/LV/inbox/LV-20261026-0001/" + kept[-1]}
+        state_path = os.path.join(self.root, "LV-20261026-0001", "state.json")
+        state = download_batch.load_json(state_path)
+        state["status"] = "uploaded"
+        download_batch.save_json(state_path, state)
+        self.assertEqual(self.dl.run(), [("LV-20261026-0001", "waiting for OneDrive")])
 
     def test_a_scheduled_run_starts_one_batch_a_day(self):
         self.dl.run()

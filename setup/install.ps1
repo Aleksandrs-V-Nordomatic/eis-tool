@@ -3,20 +3,23 @@ Installs the Tender batch downloader on a Windows computer.
 
     powershell -ExecutionPolicy Bypass -File setup\install.ps1 -LibraryProject "<project folder in the library>"
 
+The Automations library must be synced to this computer by OneDrive (Sync, or Add shortcut to
+My files); -LibraryFolder names its local folder when it is not found by itself.
+
 What it does:
   1. clones the repository to %LOCALAPPDATA%\eis-tool\app (or updates it) and makes a
      Python environment there;
   2. writes the settings to %USERPROFILE%\.eis-tool\downloader.json;
   3. asks for the monday.com token and the GitHub token and keeps them in the Windows
      Credential Manager (skip with -NoCredentials);
-  4. opens the browser once to sign in to the SharePoint gateway;
-  5. registers the task "Tender Radar LV download" (daily at 10:00 and at sign-in) and puts
+  4. registers the task "Tender Radar LV download" (daily at 10:00 and at sign-in) and puts
      the shortcut "Tender Radar LV" on the desktop.
 
 Needs Python 3.12 or newer and Git on PATH; 7-Zip for 7z and RAR archives.
 #>
 param(
     [Parameter(Mandatory = $true)][string]$LibraryProject,
+    [string]$LibraryFolder = "",
     [string]$Country = "LV",
     [string]$Kit = "kit/LV",
     [string]$Batches = "C:\radar\batches",
@@ -52,11 +55,28 @@ if (-not (Test-Path "C:\Program Files\7-Zip\7z.exe") -and -not (Get-Command 7z -
     Write-Warning "7-Zip is not installed: 7z and RAR archives will be uploaded whole"
 }
 
+if (-not $LibraryFolder) {
+    $places = @()
+    if ($env:OneDriveCommercial) {
+        $places += Get-ChildItem $env:OneDriveCommercial -Directory -ErrorAction SilentlyContinue
+        $organisation = (Split-Path $env:OneDriveCommercial -Leaf) -replace '^OneDrive - ', ''
+        $places += Get-ChildItem (Join-Path $env:USERPROFILE $organisation) -Directory -ErrorAction SilentlyContinue
+    }
+    $found = $places | Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName $LibraryProject) } | Select-Object -First 1
+    if (-not $found) { throw "The library is not synced here: sync it with OneDrive, or pass -LibraryFolder" }
+    $LibraryFolder = $found.FullName
+}
+if (-not (Test-Path -LiteralPath (Join-Path $LibraryFolder $LibraryProject))) {
+    throw "$LibraryFolder does not hold $LibraryProject"
+}
+Write-Host "Library folder: $LibraryFolder"
+
 $settings_dir = Join-Path $env:USERPROFILE ".eis-tool"
 New-Item -ItemType Directory -Force $settings_dir | Out-Null
 New-Item -ItemType Directory -Force $Batches | Out-Null
 $settings = [ordered]@{
     country = $Country
+    library_root = $LibraryFolder
     library_project = $LibraryProject
     kit = $Kit
     batches = $Batches
@@ -78,9 +98,6 @@ if (-not $NoCredentials) {
             Remove-Item Env:\EIS_SECRET_VALUE
         }
     }
-    Push-Location $app
-    & $vpy gateway.py sign-in
-    Pop-Location
 }
 
 $run = Join-Path $app "setup\run.ps1"
