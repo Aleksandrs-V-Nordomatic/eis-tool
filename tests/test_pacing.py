@@ -21,13 +21,13 @@ class Pause(unittest.TestCase):
         self.assertAlmostEqual(eis_fetch.pause_for(95 * 1024), eis_fetch.PAUSE_FLOOR, places=1)
 
     def test_a_large_record_still_costs_the_full_pause(self):
-        self.assertEqual(eis_fetch.pause_for(40 * 1048576), eis_fetch.PAUSE_BETWEEN_RECORDS)
+        self.assertEqual(eis_fetch.pause_for(40 * 1048576), eis_fetch.PAUSE_MAX)
 
-    def test_it_never_exceeds_the_old_flat_value(self):
-        # The change may only ever make us more polite per megabyte, never less.
+    def test_it_never_exceeds_the_maximum(self):
+        # Sizing the pause by bytes may only make us more polite per megabyte, never less.
         for mb in (0, 1, 5, 10, 100, 1000):
             self.assertLessEqual(eis_fetch.pause_for(int(mb * 1048576)),
-                                 eis_fetch.PAUSE_BETWEEN_RECORDS)
+                                 eis_fetch.PAUSE_MAX)
 
     def test_it_never_drops_below_the_floor(self):
         for size in (0, -1, 1, 1024):
@@ -39,17 +39,17 @@ class Pause(unittest.TestCase):
         self.assertEqual(waits, sorted(waits))
 
     def test_a_zero_pause_disables_it_entirely(self):
-        old = eis_fetch.PAUSE_BETWEEN_RECORDS
-        eis_fetch.PAUSE_BETWEEN_RECORDS = 0
+        old = eis_fetch.PAUSE_MAX
+        eis_fetch.PAUSE_MAX = 0
         try:
             self.assertEqual(eis_fetch.pause_for(10 * 1048576), 0.0)
         finally:
-            eis_fetch.PAUSE_BETWEEN_RECORDS = old
+            eis_fetch.PAUSE_MAX = old
 
     def test_the_lot_explosion_costs_minutes_instead_of_ten_minutes(self):
         # A heavily subdivided tender: many waits after many small records.
         by_volume = sum(eis_fetch.pause_for(95 * 1024) for _ in range(135))
-        flat = 135 * eis_fetch.PAUSE_BETWEEN_RECORDS
+        flat = 135 * eis_fetch.PAUSE_MAX
         self.assertLess(by_volume, flat / 4)
 
 

@@ -94,7 +94,7 @@ class NestedContainers(unittest.TestCase):
                         self.by_kind)
 
     def test_a_document_inside_an_edoc_inside_an_edoc_is_read(self):
-        # The shape that went unread at depth 3 and cost three real documents.
+        # Signed containers nest: an .edoc inside an .edoc inside a zip.
         self.assertTrue(any(s.endswith("Matr.edoc/In.edoc/Piel5.docx")
                             for s in self.by_kind["markdown"]), self.by_kind)
 
@@ -104,8 +104,8 @@ class NestedContainers(unittest.TestCase):
         self.assertGreater(self.manifest["chars"], 40)
 
     def test_container_plumbing_is_not_offered_as_a_document(self):
-        # Two real documents produced seven entries before this rule: five were `mimetype`
-        # and XAdES signature parts, which would pad a reading packet with signature XML.
+        # Two documents, not seven entries: `mimetype` and XAdES signature parts would pad
+        # a reading packet with signature XML.
         self.assertEqual(self.manifest["markdown"], 2)
         for source in self.by_kind.get("packaging", []):
             self.assertTrue(source.endswith("mimetype") or "META-INF/" in source, source)

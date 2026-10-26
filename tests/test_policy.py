@@ -2,9 +2,7 @@
 # -*- coding: utf-8 -*-
 """The recall gate, which is the same rule in every country.
 
-It used to live in `batch.py` and be tested there, which made it look like a property of
-this portal. It is not: the terms come from the caller's environment and CPV is European.
-These tests moved with the code, so the gate and the proof of it stay together.
+It is not a property of this portal: the terms come from the caller and CPV is European.
 
 The fixture is deliberately unrelated to anything anyone hunts for — the repository must
 disclose the SHAPE of the filter and never its subject.
@@ -27,8 +25,7 @@ class DownloadFilter(unittest.TestCase):
 
     The policy under test is a FIXTURE, not a deployment's. What is being proved is the
     mechanism — which way each signal fails, and which rule wins when two disagree — and
-    that is independent of anybody's terms. Committing real terms here would publish the
-    policy that `EIS_POLICY` exists to keep out of the repository.
+    that is independent of anybody's terms. Real terms stay out of the repository.
     """
 
     FIXTURE = json.dumps({
@@ -122,14 +119,13 @@ class PolicySource(unittest.TestCase):
 class OverriddenCodes(unittest.TestCase):
     """A code that survives its own excluded division.
 
-    The exclusions ask what the buyer classified a purchase as, and 62% of live procurements
-    carry one code only — so a purchase filed under a service division has its whole code set
+    The exclusions ask what the buyer classified a purchase as, and many procurements carry
+    one code only — so a purchase filed under a service division has its whole code set
     inside an excluded one and is dropped before a byte moves, however exactly its title says
-    what it is. Whether such a tender is wanted is a later question; the gate's job is only to
-    stop deciding it in advance.
+    what it is. Whether such a tender is wanted is a later question.
 
     The fixtures are invented, like every other fixture here. What any deployment actually
-    looks for arrives in a secret and is named nowhere in this repository.
+    looks for arrives from the caller and is named nowhere in this repository.
     """
 
     def policy(self, **extra):
@@ -170,8 +166,8 @@ class OverriddenCodes(unittest.TestCase):
 
     def test_a_policy_written_before_overrides_existed_still_loads(self):
         rules = self.policy()
-        # The tuple grows as optional fields are added; what this protects is that a policy
-        # written before any of them loads, and that every one it omits defaults to empty.
+        # A policy without the optional fields loads, and every one it omits defaults to
+        # empty.
         self.assertEqual(len(rules), 5)
         self.assertEqual(rules[3], ())      # override_prefixes
         self.assertEqual(rules[4], ())      # recall_cpv_prefixes
@@ -183,8 +179,6 @@ class ExclusionsWithoutAWhitelist(unittest.TestCase):
     A recall list is a whitelist, and a whitelist suits a caller who buys a nameable thing.
     A caller whose scope hides inside somebody else's purchase needs the opposite gate: drop
     what the buyer's own codes place outside, keep the rest, and let the documents decide.
-    Before this, a policy without recall terms loaded as `None` — no gate at all, exclusions
-    included — so the only way to have the exclusions was to accept the whitelist with them.
     """
 
     EXCLUSIONS_ONLY = json.dumps({
@@ -215,14 +209,14 @@ class ExclusionsWithoutAWhitelist(unittest.TestCase):
             self.policy))
 
     def test_a_policy_with_no_rules_at_all_is_still_no_policy(self):
-        """Absent, unreadable and empty all mean fetch everything. That is unchanged: a
-        filter that failed to load must never be the reason a day came up short."""
+        """Absent, unreadable and empty all mean fetch everything: a filter that failed to
+        load must never be the reason a day came up short."""
         self.assertIsNone(policy.load_policy(json.dumps({})))
         self.assertIsNone(policy.load_policy(json.dumps({"recall_title_terms": []})))
         self.assertIsNone(policy.load_policy("   "))
 
     def test_recall_terms_still_work_when_they_are_given(self):
-        """Adding the exclusions-only shape may not change what a whitelist policy does."""
+        """The exclusions-only shape does not change what a whitelist policy does."""
         both = policy.load_policy(json.dumps({"recall_title_terms": ["alfa"],
                                               "hard_exclude_prefixes": ["99999"]}))
         self.assertFalse(policy.outside_scope({"title": "alfa piegāde"}, both))

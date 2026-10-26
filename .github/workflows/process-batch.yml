@@ -1,0 +1,40 @@
+name: process-batch
+
+# Started by the Tender batch downloader once a batch is in the staging folder of the library.
+
+on:
+  workflow_dispatch:
+    inputs:
+      batch_id:
+        description: "The batch to process, for example LV-20261026-0001"
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: process-batch
+  cancel-in-progress: false
+
+jobs:
+  process:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    container: ${{ vars.TOOLCHAIN_IMAGE || 'set-the-TOOLCHAIN_IMAGE-variable' }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Process ${{ inputs.batch_id }}
+        env:
+          BATCH_ID: ${{ inputs.batch_id }}
+          GRAPH_TENANT_ID: ${{ secrets.GRAPH_TENANT_ID }}
+          GRAPH_CLIENT_ID: ${{ secrets.GRAPH_CLIENT_ID }}
+          GRAPH_CLIENT_SECRET: ${{ secrets.GRAPH_CLIENT_SECRET }}
+          GRAPH_DRIVE_ID: ${{ secrets.GRAPH_DRIVE_ID }}
+          GRAPH_DEST_ROOT: ${{ secrets.GRAPH_DEST_ROOT }}
+          ROUTINE_FIRE_URL: ${{ secrets.ROUTINE_FIRE_URL }}
+          ROUTINE_FIRE_TOKEN: ${{ secrets.ROUTINE_FIRE_TOKEN }}
+        run: python3 process_batch.py --batch-id "$BATCH_ID"

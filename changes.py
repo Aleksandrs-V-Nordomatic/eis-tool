@@ -3,12 +3,9 @@
 """What changed about one tender since the last time it was fetched.
 
 Pure functions over a pack's own JSON. No network, no model, no clock: the same pack
-compared against the same previous state answers the same thing on any machine, which is
-the only reason this is worth having at all. A consumer that must re-read a tender because
-it cannot tell whether anything moved is a consumer reading forty documents to learn that
-none of them changed.
+compared against the same previous state answers the same thing on any machine.
 
-WHAT IT COMPARES, AND WHAT IT REFUSES TO.
+What it compares:
 
     facts       the tender's own published fields — deadline, status, value, CPV
     records     the page's document records, by id: publish date, title, and the digests
@@ -16,19 +13,13 @@ WHAT IT COMPARES, AND WHAT IT REFUSES TO.
     documents   the extracted text, addressed by the digest of the file it came from
     unreadable  the files no decoder could read, by their own digest
 
-Every comparison is over sha256 of ORIGINAL bytes, never over the Markdown. That is the
-line that keeps this honest: `normalize.py` is deterministic for a given version, but two
-versions of it may render one unchanged PDF differently, and a diff taken over the Markdown
-would report that as the buyer replacing a document. The extractor's fingerprint is carried
-separately (`tool`), so "the text was extracted again" is a different sentence from "the
-tender changed" and a reader is never asked to guess which one it is looking at.
+Documents are compared over sha256 of the original bytes, never over the Markdown, so a new
+extractor version is not reported as a change. The extractor's version is carried separately
+(`tool`), so "the text was extracted again" is a different answer from "the tender changed".
 
-WHAT IS DELIBERATELY NOT A FACT. `register_check` and `eis_only` record how this tool came
-to know about the procurement — by discovery, by a link on the page, or not at all. A
-tender found through the register on Monday and fetched by id on Tuesday has not changed;
-only the route to it has. Comparing them would report a change every time the caller varied
-how it asked, which is the one kind of false positive that would train a reader to ignore
-the whole file.
+`register_check` and `eis_only` are deliberately not facts: they record how this tool came
+to know about the procurement, not the procurement itself, and comparing them would report
+a change whenever the caller reached the same tender by a different route.
 """
 
 import hashlib
@@ -50,19 +41,16 @@ FACTS = (
     "cpv_main", "cpv_additional", "place", "lots", "framework", "contract_duration",
 )
 
-# THE FIELDS WHOSE VALUE IS A DISPLAY STRING, NOT A FACT.
+# The fields whose value is a display string, not a fact.
 #
 # EIS serves the same procurement in Latvian or in English and does not let the caller
-# decide: the downloader has always asked for Latvian first and is answered in English often
-# enough to matter — twice in four consecutive runs of one tender, an hour apart. The stable
-# `#id` keys survive that; the values under them do not. `Izsludināts` becomes `Announced`,
-# `Nē` becomes `No`, and `28.08.2026 09:00 (plānots)` becomes the same instant `(scheduled)`.
+# decide. The stable `#id` keys survive that; the values under them do not. `Izsludināts`
+# becomes `Announced`, `Nē` becomes `No`, and `28.08.2026 09:00 (plānots)` becomes the same
+# instant `(scheduled)`.
 #
-# Compared blind, every one of these reports as an amendment on every language flip, for
-# every tender in the run — the exact false positive this module's docstring says would train
-# a reader to ignore the file. So they are compared only between two pages served in the same
-# language, and a flip is reported as itself rather than as ten amendments that did not
-# happen. Nothing is dropped quietly: `facts_not_compared` names what was skipped.
+# So they are compared only between two pages served in the same language, and a language
+# flip is reported as itself rather than as amendments that did not happen.
+# `facts_not_compared` names what was skipped.
 LOCALIZED = ("status", "procedure", "legal_basis", "work_kind", "award_criteria",
              "lots", "framework", "contract_duration",
              "deadline", "opening", "docs_until", "consultation_until")
@@ -87,32 +75,25 @@ def page_language(procurement):
 RECORD_FIELDS = ("publish_date", "title", "type_code", "section", "withheld")
 
 
-# WHAT DECIDES WHETHER THE SAME FILE YIELDS THE SAME MARKDOWN, AND NOTHING ELSE.
+# What decides whether the same file yields the same Markdown, and nothing else.
 #
 # The extractor's version is recorded beside the text so that re-extraction can be told apart
-# from an amendment, and a tender whose version moved has its text refreshed. That makes the
-# value expensive to get wrong in one direction: anything it tracks which does NOT change the
-# output turns an unrelated edit into a re-upload of every document of every tender ever
-# fetched. The run's commit is exactly such a value — a corrected comment moves it.
+# from an amendment, and a tender whose version moved has its text refreshed. Anything it
+# tracks which does not change the output would turn an unrelated edit into a re-upload of
+# every document of every tender, so it is a digest of the extraction path itself: the
+# extractor and the library versions it is pinned to.
 #
-# So it is a digest of the extraction path itself: the extractor, and the library versions it
-# is pinned to. Editing this file, the delivery, or a test does not move it, because none of
-# them can change a single character of the Markdown.
-#
-# WHAT IT DOES NOT COVER, SAID PLAINLY. The toolchain image is pinned by tag rather than by
-# digest, and LibreOffice and Tesseract live inside it — so a rebuilt image can change the
-# text of Word 97 attachments and scans without moving this value. Closing that means pinning
-# the image by digest, which is a different change in a different file.
+# Not covered: the toolchain image is pinned by tag rather than by digest, and LibreOffice
+# and Tesseract live inside it, so a rebuilt image can change the text of Word 97
+# attachments and scans without moving this value.
 PIPELINE_FILES = ("normalize.py", "requirements.txt")
 
-# AND SEPARATELY, WHAT DECIDES THE FACTS. The published fields are read by `eis_page`, not by
-# the extractor, and the two move for different reasons and cost different things. A parser
-# improvement — one more spelling of a label, a field read that used to come back null — will
-# change facts across the whole corpus in a single day, and a diff that did not know would
-# report every one of them as an amendment somebody made. That is the same false positive the
-# page language produces, arriving from our own side.
+# Separately, what decides the facts. The published fields are read by `eis_page`, not by
+# the extractor. A parser change — one more spelling of a label, a field that was null now
+# read — changes facts across the whole corpus at once, and a diff that did not know would
+# report each one as an amendment.
 #
-# It is deliberately NOT in PIPELINE_FILES. Tracking it there would re-upload every document
+# It is deliberately not in PIPELINE_FILES: tracking it there would re-upload every document
 # of every tender for an edit that cannot change one character of Markdown.
 PARSER_FILES = ("eis_page.py",)
 
@@ -143,9 +124,8 @@ def pipeline_version(root=None):
 def parser_version(root=None, files=None):
     """A digest of the page parser — what decides the facts read off a procurement page.
 
-    `files` names which parser, because there is now more than one and they move
-    independently: `country.parser_files(code)` gives the pair for a country. It defaults
-    to Latvia's, which is what every caller written before the second country meant.
+    `files` names which parser, because each country has its own:
+    `country.parser_files(code)` gives the pair for a country. It defaults to Latvia's.
     """
     return _digest(root, files or PARSER_FILES)
 
@@ -181,6 +161,8 @@ def _records(manifest):
             digest = f.get("sha256")
             if digest:
                 files[digest] = f.get("original_name") or f.get("filename")
+        for f in record.get("skipped_files", []):
+            files["skipped:%s:%s" % (f.get("file_id") or "", f.get("name"))] = f.get("name")
         out[rid] = {"publish_date": record.get("publish_date"),
                     "title": record.get("title"),
                     "type_code": record.get("type_code"),
@@ -232,13 +214,9 @@ def _unreadable(normalized):
 def fingerprint(pid, procurement, manifest, normalized, tool=None, parser=None):
     """One tender's state, as the one dict everything downstream compares.
 
-    NOTHING IN HERE MOVES UNLESS THE TENDER DOES. No date, no run id, no counter — so two
-    runs over an unchanged tender produce equal fingerprints, and the delivery can leave the
-    stored one alone instead of rewriting a few hundred kilobytes to advance a timestamp.
-    When a tender was last looked at is a fact about the run, and lives in `seen`.
-
-    `tool` is the extractor's own version — the run's commit, in production. It is recorded
-    rather than compared: see the module docstring for why the two must not be confused.
+    Nothing in here moves unless the tender does: no date, no run id, no counter, so two
+    runs over an unchanged tender produce equal fingerprints. When a tender was last looked
+    at lives in `seen`. `tool` is the extractor's version, recorded rather than compared.
     """
     return {"schema": STATE_SCHEMA,
             "pid": str(pid),
@@ -384,8 +362,7 @@ def diff(previous, current, date=None, run_id=None, seen=None):
         "documents_removed": docs_gone,
         "unreadable_added": gaps_added,
         "unreadable_removed": gaps_gone,
-        # What did NOT have to travel. The number this whole arrangement exists to make
-        # large, and the one to watch if it ever stops being.
+        # What did not have to travel.
         "carried_over": len(set(docs_before) & set(docs_now)),
         "counts": {"records": len(current.get("records", {})),
                    "documents": len(docs_now),

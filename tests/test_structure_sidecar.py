@@ -219,8 +219,8 @@ class TheSidecar(unittest.TestCase):
 
     def test_it_prints_no_number_of_its_own(self):
         # The division of labour: we hand over facts, the consumer computes and labels. This
-        # checks the shape rather than the vocabulary — the note is allowed to talk about
-        # clauses, and an earlier substring scan failed the moment it did.
+        # checks the shape rather than the vocabulary, because the note is allowed to talk
+        # about clauses.
         for entry in self.structure["paragraphs"]:
             self.assertEqual(set(entry) & {"clause", "number", "label", "text"}, set(),
                              "a computed number must not travel as if it were a fact")

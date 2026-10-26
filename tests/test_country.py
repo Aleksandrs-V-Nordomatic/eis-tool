@@ -8,7 +8,7 @@ There is no error to notice. So the rule is structural rather than checked after
 and the destination are both derived from one resolved code, and every way of expressing a
 mismatch is refused at the point it is expressed.
 
-THIS REPOSITORY FETCHES ONE COUNTRY, AND THAT MAKES THE CHECK MORE IMPORTANT, NOT LESS.
+This repository fetches one country, and that makes the check more important, not less.
 Every code but `LV` is one this tool has no source for, and each is refused by the same
 line. That is the whole guarantee: this tool cannot be pointed at another portal, and it
 cannot be pointed at another folder.
@@ -24,7 +24,7 @@ import changes
 import country
 
 # A code this repository deliberately has no source for — which is every code but `LV`, and
-# the shape of what a stale command line or a copied secret names.
+# the shape of what a stale command line or a copied setting names.
 ELSEWHERE = "EE"
 
 
@@ -132,8 +132,8 @@ class TheParserFollowsTheCountry(unittest.TestCase):
             country.parser_files(ELSEWHERE)
 
     def test_the_default_is_this_repositorys_reader(self):
-        # Every caller written before the country flag existed meant "this tool's parser",
-        # and in a single-country repository that is the only thing it can mean.
+        # A caller that names no files means "this tool's parser", and in a single-country
+        # repository that is the only thing it can mean.
         self.assertEqual(changes.parser_version(),
                          changes.parser_version(files=country.parser_files("LV")))
 

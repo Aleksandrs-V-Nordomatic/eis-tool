@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""The one retry policy, and the failure it was written for.
+"""The one retry policy.
 
-A shard died 0.8 seconds into a run holding a `RemoteDisconnected` that its own four-try
-retry loop had watched go past, because the loop caught `urllib.error.URLError` and that is
-not a parent of it. The loop was correct-looking and never once entered.
-
-These tests hold the properties that stop it happening again: the classifier knows what a
-reset is, a reset is retried and a 404 is not, patience actually grows, and a caller can
+`http.client.RemoteDisconnected` is not a `urllib.error.URLError`, so a loop that catches
+only URLError never retries a dropped connection. These tests hold the properties that
+matter: the classifier knows what a reset is, a reset is retried and a 404 is not, patience actually grows, and a caller can
 tell "we could not ask" apart from "we asked and were told no" without reading a string.
 """
 
@@ -65,21 +62,19 @@ class Sleepless(unittest.TestCase):
 class Classifier(unittest.TestCase):
 
     def test_a_reset_connection_is_retryable(self):
-        # THE BUG. `RemoteDisconnected` is a ConnectionResetError and a BadStatusLine, so it
-        # is an OSError and an HTTPException — and neither a URLError nor a TimeoutError,
-        # which is what the old tuple named.
+        # `RemoteDisconnected` is a ConnectionResetError and a BadStatusLine, so it is an
+        # OSError and an HTTPException — and neither a URLError nor a TimeoutError.
         self.assertTrue(net.retryable(http.client.RemoteDisconnected("closed")))
 
-    def test_the_old_tuple_would_still_miss_it(self):
-        # Kept as a test rather than a comment: this is the whole reason net.py exists, and
-        # a future edit that "simplifies" the tuple back has to fail here first.
+    def test_url_errors_alone_would_miss_it(self):
+        # An edit that narrows the tuple to URLError or TimeoutError has to fail here.
         reset = http.client.RemoteDisconnected("closed")
         self.assertNotIsInstance(reset, urllib.error.URLError)
         self.assertNotIsInstance(reset, TimeoutError)
         self.assertIsInstance(reset, net.TRANSPORT_ERRORS)
 
     def test_a_truncated_body_is_retryable_and_is_not_an_oserror(self):
-        # The other half nobody catches: HTTPException that is not OSError.
+        # The other half: HTTPException that is not OSError.
         self.assertFalse(isinstance(http.client.IncompleteRead(b""), OSError))
         self.assertTrue(net.retryable(http.client.IncompleteRead(b"")))
 
@@ -101,8 +96,7 @@ class Classifier(unittest.TestCase):
 class Patience(Sleepless):
 
     def test_a_reset_on_the_first_attempt_does_not_end_the_run(self):
-        # The exact shape of the incident: the register drops the very first request of the
-        # day, and answers the next one.
+        # The server drops the first request and answers the next one.
         answers = [http.client.RemoteDisconnected("closed"), b'{"ok": true}']
 
         body, _ = net.open_url("https://example.invalid/", opener=Opener(answers))
@@ -114,8 +108,7 @@ class Patience(Sleepless):
         net.open_url("https://example.invalid/", opener=Opener(answers))
         self.assertEqual(len(self.slept), 4)
         self.assertEqual(self.slept, sorted(self.slept))
-        # The old loop spent 3 s in total, which is shorter than most portal hiccups and so
-        # amounted to no patience at all. Anything in that region is a regression.
+        # A few seconds in total is shorter than most portal hiccups.
         self.assertGreater(sum(self.slept), 30)
 
     def test_a_refusal_is_not_retried(self):
@@ -141,9 +134,10 @@ class Patience(Sleepless):
         refusal = urllib.error.HTTPError("u", 503, "", {"Retry-After": "86400"}, None)
         self.assertLessEqual(net.delay(0, refusal), net.RETRY_AFTER_CAP * 1.5)
 
-    def test_four_shards_do_not_retry_in_the_same_second(self):
-        # They start in the same second and make the identical request. Without jitter their
-        # retries land together too, which is the shape of a request that gets refused.
+    def test_parallel_callers_do_not_retry_in_the_same_second(self):
+        # Parallel jobs start in the same second and make the identical request. Without
+        # jitter their retries land together too, which is the shape of a request that gets
+        # refused.
         waits = {round(net.delay(1), 4) for _ in range(20)}
         self.assertGreater(len(waits), 1)
 
