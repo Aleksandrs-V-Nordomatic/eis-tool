@@ -36,6 +36,9 @@ import watchlist
 SETTINGS = os.path.join(os.path.expanduser("~"), ".eis-tool", "downloader.json")
 LOG_CAP = 5 * 1024 * 1024
 MAX_ATTEMPTS = 3
+# SharePoint rewrites the Office files it receives, so their size and hash change; under this
+# suffix the inbox keeps the bytes that were downloaded. The manifest names each file's inbox name.
+INBOX_SUFFIX = ".bin"
 MAX_NESTING = 3
 OPEN = ("downloading", "uploaded", "failed")
 
@@ -532,12 +535,15 @@ class Downloader:
         manifest = self.manifest(batch_id, state)
         for tender in manifest["tenders"]:
             for f in tender["files"]:
-                if f["decision"] != selection.DOWNLOAD or not f["stored"] or f["stored"] in uploaded:
+                if f["decision"] != selection.DOWNLOAD or not f["stored"]:
+                    continue
+                f["inbox"] = f["stored"] + INBOX_SUFFIX
+                if f["inbox"] in uploaded:
                     continue
                 local = os.path.join(self.folder(batch_id), "tenders", tender["pid"], "files",
                                      f["stored"].split("/", 1)[1])
-                uploaded[f["stored"]] = self.library.upload("%s/%s" % (inbox, f["stored"]), local,
-                                                            replace=True)
+                uploaded[f["inbox"]] = self.library.upload("%s/%s" % (inbox, f["inbox"]), local,
+                                                           replace=True)
                 self.save(batch_id, state)
         path = os.path.join(self.folder(batch_id), "manifest.json")
         save_json(path, manifest)

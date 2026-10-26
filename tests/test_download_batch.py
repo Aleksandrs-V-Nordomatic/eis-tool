@@ -178,7 +178,8 @@ class Run(unittest.TestCase):
         self.dl.run()
         self.assertTrue(self.library.uploads[-1].endswith("/manifest.json"))
         self.assertEqual(self.dispatched, ["LV-20261026-0001"])
-        names = [p.rsplit("/", 1)[-1] for p in self.library.uploads[:-1]]
+        names = [p.rsplit("/", 1)[-1].removesuffix(".bin") for p in self.library.uploads[:-1]]
+        self.assertTrue(all(p.endswith(".bin") for p in self.library.uploads[:-1]))
         self.assertTrue(any("Nolikums.docx" in n for n in names))
         self.assertFalse(any("veidlapa" in n for n in names))
         self.assertFalse(any(n.endswith("Projekts.zip") for n in names))
@@ -193,7 +194,8 @@ class Run(unittest.TestCase):
         spec = members["Teksts/Tehniska specifikacija.pdf"]
         self.assertEqual(spec["decision"], "download")
         self.assertEqual(spec["kind"], "Technical specification")
-        self.assertIn("p/work/LV/inbox/LV-20261026-0001/" + spec["stored"], self.library.files)
+        self.assertEqual(spec["inbox"], spec["stored"] + ".bin")
+        self.assertIn("p/work/LV/inbox/LV-20261026-0001/" + spec["inbox"], self.library.files)
 
     def test_every_skipped_file_keeps_its_name_in_the_manifest(self):
         self.dl.run()
@@ -208,7 +210,7 @@ class Run(unittest.TestCase):
         self.assertEqual(inner["decision"], "unpacked")
         task = next(f for f in files if f["name"] == "Darba uzdevums.docx")
         self.assertEqual((task["archive"], task["decision"]), ("Projekts.zip/Pielikumi.zip", "download"))
-        uploaded = [p.rsplit("/", 1)[-1] for p in self.library.uploads]
+        uploaded = [p.rsplit("/", 1)[-1].removesuffix(".bin") for p in self.library.uploads]
         self.assertFalse(any(n.endswith("Pielikumi.zip") for n in uploaded))
         self.assertTrue(any(n.endswith("Darba_uzdevums.docx") or n.endswith("Darba uzdevums.docx") for n in uploaded))
 
