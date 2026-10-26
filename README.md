@@ -61,13 +61,14 @@ language is compared only on the fields that do not depend on it.
 | Step | Where |
 |---|---|
 | Lock, so one batch runs at a time | `download_batch.Lock` |
-| Read the three kit files through the SharePoint gateway | `gateway.py` |
-| Resume an open batch; a handed-over batch with no completion record after 6 hours is uploaded and started again | `Downloader.run`, `recheck` |
+| Read the three kit files from the library folder OneDrive syncs to the computer | `synced.py` |
+| Resume an open batch; a handed-over batch with no completion record after 6 hours is copied and started again | `Downloader.run`, `recheck` |
 | Window: from the moment the last handed-over batch listed the register to this run; the scheduled task starts at most one batch a day, the desktop shortcut starts one at once | `Downloader.plan` |
 | Notices of the window, the recall gate, the watch list | `harvest.py`, `policy.py`, `watchlist.py` |
 | Each tender: read the page, list the files of each current record, decide each file, download the kept ones (`.part`, size check, sha256) | `eis_fetch.Tender`, `selection.py` |
 | An archive with skipped members: its kept members travel on their own | `archives.py` |
-| Upload the kept files, then `manifest.json`; each counts when the library returns an eTag | `Downloader.upload` |
+| Copy the kept files, then `manifest.json`, into the synced library folder | `Downloader.upload` |
+| Wait until OneDrive shows every one of them as an in-sync placeholder, up to two hours; otherwise the next run waits again | `Downloader.wait_for_sync`, `synced.Library.not_in_sync` |
 | Start `process-batch.yml` with the batch id | `Downloader.dispatch` |
 
 A tender that fails is tried again by the next run; after three failed runs in a row it is
@@ -77,7 +78,7 @@ Windows notifications report the start, the end and every failure; the batch log
 
 ### Install on a computer
 
-Needs Windows, Python 3.12+, Git and 7-Zip.
+Needs Windows, Python 3.12+, Git, 7-Zip, and the Automations library synced by OneDrive.
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File setup\install.ps1 -LibraryProject "<project folder in the library>"
@@ -86,7 +87,7 @@ powershell -ExecutionPolicy Bypass -File setup\install.ps1 -LibraryProject "<pro
 It clones this repository to `%LOCALAPPDATA%\eis-tool\app`, makes a Python environment, writes
 `%USERPROFILE%\.eis-tool\downloader.json`, asks for two tokens (monday.com, read access to the
 board; GitHub, fine-grained with Actions read and write on this repository) and keeps them in
-the Windows Credential Manager, opens the browser once to sign in to the SharePoint gateway,
+the Windows Credential Manager, finds the library's synced folder (or takes `-LibraryFolder`),
 registers the task **Tender Radar LV download** (daily at 10:00 and at sign-in) and puts the
 shortcut **Tender Radar LV** on the desktop. Each run updates the clone from `master` first.
 
