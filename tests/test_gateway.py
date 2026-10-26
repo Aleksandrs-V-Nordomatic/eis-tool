@@ -25,6 +25,7 @@ class FakeServer:
     def __init__(self):
         self.calls = []
         self.tool_answers = {}
+        self.files = {}
 
     def __call__(self, url, data=None, headers=None, method=None, timeout=60):
         self.calls.append((url, data, headers or {}, method))
@@ -42,10 +43,14 @@ class FakeServer:
                     json.dumps({"jsonrpc": "2.0", "id": message["id"], "result": {}}).encode()
             name = message["params"]["name"]
             answer = self.tool_answers[name]
+            # The shape the gateway sends: bare answer as text, wrapped in structuredContent.
             body = "event: message\ndata: %s\n\n" % json.dumps(
                 {"jsonrpc": "2.0", "id": message["id"],
-                 "result": {"content": [{"type": "text", "text": json.dumps(answer)}]}})
+                 "result": {"content": [{"type": "text", "text": json.dumps(answer)}],
+                            "structuredContent": {"result": answer}}})
             return 200, {"Content-Type": "text/event-stream"}, body.encode()
+        if url in self.files:
+            return 200, {}, self.files[url]
         raise AssertionError(url)
 
 
@@ -108,6 +113,22 @@ class Calls(unittest.TestCase):
             fh.write(b"abc")
         self.assertEqual(gw.upload("x/work/f.txt", path), "e1")
         self.assertEqual(sent["body"], b"abc")
+
+    def test_a_library_file_is_read_through_its_download_link(self):
+        self.store.put("tokens", {"access_token": "a", "refresh_token": "r",
+                                  "expires_at": time.time() + 600})
+        self.server.tool_answers["file_info"] = {"name": "w.json", "size": 2}
+        self.server.tool_answers["create_download_link"] = {"url": "https://gw/download/t",
+                                                            "size": 2}
+        self.server.files["https://gw/download/t"] = b"{}"
+        self.assertEqual(self.gw.read_text("p/kit/LV/w.json"), "{}")
+
+    def test_a_folder_listing_gives_the_item_names(self):
+        self.store.put("tokens", {"access_token": "a", "refresh_token": "r",
+                                  "expires_at": time.time() + 600})
+        self.server.tool_answers["list_directory"] = {
+            "path": "p", "items": [{"name": "a"}, {"name": "b"}], "nextCursor": None}
+        self.assertEqual(self.gw.list_names("p"), ["a", "b"])
 
 
 if __name__ == "__main__":
