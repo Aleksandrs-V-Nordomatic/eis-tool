@@ -51,10 +51,18 @@ def members(path):
                           capture_output=True, timeout=600, creationflags=NO_WINDOW)
     if proc.returncode != 0:
         raise Unreadable(proc.stderr.decode("utf-8", "replace")[:200] or "7-Zip failed")
+    return listed_files(proc.stdout.decode("utf-8", "replace"))
+
+
+def listed_files(listing):
+    """The file paths of a `7z l -slt` listing. A folder is marked `Folder = +` in ZIP and RAR
+    archives, but only by the D of its attributes in 7z ones; extracting a folder would pour
+    all its files into one."""
     out, current = [], {}
-    for line in proc.stdout.decode("utf-8", "replace").splitlines() + [""]:
+    for line in listing.splitlines() + [""]:
         if not line.strip():
-            if current.get("Path") and current.get("Folder") != "+":
+            attributes = current.get("Attributes", "").split(" ")[0]
+            if current.get("Path") and current.get("Folder") != "+" and "D" not in attributes:
                 out.append(current["Path"].replace("\\", "/"))
             current = {}
             continue

@@ -73,6 +73,10 @@ class Decision(unittest.TestCase):
         self.assertTrue(RULES.is_archive("Projekts.RAR"))
         self.assertFalse(RULES.is_archive("Projekts.pdf"))
 
+    def test_a_name_eis_closes_with_a_bracket_keeps_its_extension(self):
+        self.assertTrue(RULES.is_archive("Tehniskas specifikacijas pielikums Nr.8 (03_EKA_4.zip)"))
+        self.assertEqual(selection.extension("Pielikums (final)"), "")
+
 
 if __name__ == "__main__":
     unittest.main()
