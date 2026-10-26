@@ -83,11 +83,20 @@ def load_json(path, default=None):
         return default
 
 
-def save_json(path, data):
+def save_json(path, data, tries=20):
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(data, fh, ensure_ascii=False, indent=2)
-    os.replace(tmp, path)
+    # A virus scanner or the search indexer can hold a file just written for a moment, and
+    # Windows then refuses the replace (WinError 5); the state is saved after every copied file.
+    for attempt in range(tries):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt == tries - 1:
+                raise
+            time.sleep(0.25)
 
 
 def safe_name(name, limit=120):

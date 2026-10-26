@@ -301,5 +301,27 @@ class LockTest(unittest.TestCase):
         second.release()
 
 
+class SaveTest(unittest.TestCase):
+    def test_a_replace_refused_for_a_moment_is_tried_again(self):
+        folder = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, folder, ignore_errors=True)
+        path = os.path.join(folder, "state.json")
+        real, refused = os.replace, []
+
+        def flaky(src, dst):
+            if len(refused) < 2:
+                refused.append(dst)
+                raise PermissionError(5, "Access is denied")
+            return real(src, dst)
+        sleep = download_batch.time.sleep
+        download_batch.os.replace, download_batch.time.sleep = flaky, lambda s: None
+        try:
+            download_batch.save_json(path, {"status": "uploaded"})
+        finally:
+            download_batch.os.replace, download_batch.time.sleep = real, sleep
+        self.assertEqual(len(refused), 2)
+        self.assertEqual(download_batch.load_json(path), {"status": "uploaded"})
+
+
 if __name__ == "__main__":
     unittest.main()
