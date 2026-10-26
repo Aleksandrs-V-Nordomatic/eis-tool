@@ -2,8 +2,9 @@
 
 Two decisions per file, both driven by a rules file the caller supplies:
 
-    kind_of(...)   what kind of document the file is, from its extension, its name, the folder
-                   or archive it sits in, the record title and the EIS document type
+    kind_of(...)   what kind of document the file is, from its extension, what an archive's
+                   own name states outright, its name, the folder or archive it sits in, the
+                   record title and the EIS document type
     decide(...)    download it, or skip it and keep its name
 
 The rules file holds the patterns and the list of kinds that are skipped; see
@@ -53,6 +54,9 @@ class Rules:
         self.codes_kind = codes.get("kind", UNKNOWN)
         self.skip = set(data.get("skip", []))
         self.archives = {a.lower() for a in data.get("archives", ["zip", "7z", "rar"])}
+        names = data.get("archive_names") or {}
+        self.archive_rules = [(r["kind"], re.compile(r["pattern"])) for r in names.get("rules", [])]
+        self.archive_unless = re.compile(names["unless"]) if names.get("unless") else None
 
     @classmethod
     def load(cls, source):
@@ -65,6 +69,20 @@ class Rules:
 
     def is_archive(self, name):
         return extension(name) in self.archives
+
+    def _archive_by_name(self, name):
+        """The kind an archive's own name states outright, ahead of the other name rules, so an
+        archive of photos is not opened for the word "TS" in its name. None when the name also
+        names a kind that is read, or says nothing."""
+        if not self.archive_rules or not self.is_archive(name):
+            return None
+        folded = fold(_EXT.sub("", name or ""))
+        if self.archive_unless and self.archive_unless.search(folded):
+            return None
+        for kind, pattern in self.archive_rules:
+            if pattern.search(folded):
+                return kind
+        return None
 
     def _by_name(self, name):
         """(kind, weak) from a name alone, or (None, False)."""
@@ -91,6 +109,9 @@ class Rules:
         ext_kind = self.extensions.get(extension(name))
         if ext_kind:
             return ext_kind
+        archive_kind = self._archive_by_name(name)
+        if archive_kind:
+            return archive_kind
         base = _EXT.sub("", name or "")
         if (self.generated_name and self.generated_name.match(base)
                 and self.generated_record.search(fold(record_title))):

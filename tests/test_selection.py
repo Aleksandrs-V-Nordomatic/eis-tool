@@ -46,6 +46,18 @@ class Kind(unittest.TestCase):
     def test_nothing_fits_is_unknown(self):
         self.assertEqual(RULES.kind_of("x.pdf"), "Unknown")
 
+    def test_an_archive_name_that_states_an_unread_kind_decides_first(self):
+        self.assertEqual(RULES.kind_of("TS_Annex_6_Photos of the object.zip"), "Photos and scans")
+        self.assertEqual(RULES.kind_of("Nolikums rasējumi.7z"), "Drawing sheets")
+
+    def test_an_archive_name_that_also_names_a_read_kind_is_opened(self):
+        self.assertEqual(RULES.kind_of("Tehniskā specifikācija un foto.zip"),
+                         "Technical specification")
+        self.assertEqual(RULES.kind_of("Nolikums.zip"), "Tender regulations")
+
+    def test_the_archive_name_rule_is_for_archives_only(self):
+        self.assertEqual(RULES.kind_of("Tehniskā specifikācija foto.pdf"), "Technical specification")
+
 
 class Decision(unittest.TestCase):
     def test_a_skipped_kind_keeps_only_its_name(self):

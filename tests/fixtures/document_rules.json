@@ -16,6 +16,13 @@
     {"kind": "Unknown", "pattern": "pielikum", "weak": true}
   ],
   "section_codes": {"kind": "Drawing sheets", "pattern": "(?<![A-Za-z])(AR|VAS|AVK)(?![A-Za-z])"},
+  "archive_names": {
+    "rules": [
+      {"kind": "Photos and scans", "pattern": "\\bfoto|\\bphoto"},
+      {"kind": "Drawing sheets", "pattern": "rasej"}
+    ],
+    "unless": "prasib|specifikacij"
+  },
   "skip": ["CAD files", "Photos and scans", "Bid forms", "Drawing sheets"],
   "archives": ["zip", "7z", "rar"]
 }
