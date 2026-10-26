@@ -28,7 +28,8 @@ batch.
   watch_list.json         board, columns and values of the watch list (watchlist.py)
 
 <project>/work/<CC>/
-  inbox/<batch id>/       a handed-over batch: <pid>/<file> ..., then manifest.json last
+  inbox/<batch id>/       a handed-over batch: <pid>/<file>.bin ..., then manifest.json last
+                          (.bin keeps SharePoint from rewriting Office files)
   tenders/<pid>/          one tender: procurement.json, manifest.json, doc/<key>.md,
                           normalized/manifest_normalized.json, structure.json, <pid>.zip,
                           index.json (written after the documents), state.json, seen.json,

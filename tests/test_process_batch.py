@@ -58,7 +58,7 @@ def staged(text=b"Nolikuma teksts\n"):
                  {"record_id": 1, "section": "actual", "file_id": 11, "name": "Nolikums.txt",
                   "archive": None, "member": None, "kind": "Tender regulations",
                   "decision": "download", "reason": "", "stored": "100/000_Nolikums.txt",
-                  "size": len(text), "sha256": digest},
+                  "inbox": "100/000_Nolikums.txt.bin", "size": len(text), "sha256": digest},
                  {"record_id": 1, "section": "actual", "file_id": 12, "name": "Veidlapa.docx",
                   "archive": None, "member": None, "kind": "Bid forms", "decision": "skip",
                   "reason": "kind Bid forms is not read", "stored": None, "size": None,
@@ -68,7 +68,7 @@ def staged(text=b"Nolikuma teksts\n"):
         ]}
     inbox = "%s/inbox/%s" % (BASE, BATCH)
     return Drive({inbox + "/manifest.json": json.dumps(manifest).encode(),
-                  inbox + "/100/000_Nolikums.txt": text})
+                  inbox + "/100/000_Nolikums.txt.bin": text})
 
 
 class Process(unittest.TestCase):
@@ -118,9 +118,18 @@ class Process(unittest.TestCase):
 
     def test_a_file_that_differs_from_the_manifest_stops_the_batch(self):
         drive = staged()
-        drive.files["%s/inbox/%s/100/000_Nolikums.txt" % (BASE, BATCH)] = b"other bytes"
+        drive.files["%s/inbox/%s/100/000_Nolikums.txt.bin" % (BASE, BATCH)] = b"other bytes"
         self.assertEqual(self.run_it(drive), 2)
         self.assertEqual(drive.writes, [])
+
+    def test_a_manifest_without_inbox_names_reads_the_stored_names(self):
+        drive = staged()
+        inbox = "%s/inbox/%s" % (BASE, BATCH)
+        manifest = json.loads(drive.files[inbox + "/manifest.json"])
+        del manifest["tenders"][0]["files"][0]["inbox"]
+        drive.files[inbox + "/manifest.json"] = json.dumps(manifest).encode()
+        drive.files[inbox + "/100/000_Nolikums.txt"] = drive.files.pop(inbox + "/100/000_Nolikums.txt.bin")
+        self.assertEqual(self.run_it(drive), 0)
 
     def test_no_manifest_means_incomplete(self):
         drive = staged()

@@ -51,7 +51,7 @@ def check(drive, inbox, manifest, work):
             if f["decision"] != "download":
                 continue
             local = os.path.join(folder, f["stored"].split("/", 1)[1])
-            if not drive.download("%s/%s" % (inbox, f["stored"]), local):
+            if not drive.download("%s/%s" % (inbox, f.get("inbox") or f["stored"]), local):
                 raise Incomplete("a kept file of tender %s is missing" % tender["pid"])
             if os.path.getsize(local) != f["size"] or eis_fetch.sha256_file(local) != f["sha256"]:
                 raise Incomplete("a kept file of tender %s differs from the manifest" % tender["pid"])
