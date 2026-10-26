@@ -3,18 +3,16 @@
 """Printing Latvian without letting the terminal end the run.
 
 Everything here is Latvian: tender titles, filenames, extracted document text. On a Windows
-console the default codec cannot encode `ā`, and `print()` then raises — which killed a CLI
-once on the first tender title it tried to show, and killed a library function again later
-because a caller's stdout happened to be cp1252.
+console the default codec (cp1252, for instance) cannot encode `ā`, and `print()` then
+raises.
 
 Two rules follow, and they are different:
 
-  * A COMMAND may reconfigure its own streams to UTF-8. `utf8_streams()` does that.
-  * A LIBRARY may not — the streams belong to whoever called it. So `say()` prints, and on
+  * A command may reconfigure its own streams to UTF-8. `utf8_streams()` does that.
+  * A library may not — the streams belong to whoever called it. So `say()` prints, and on
     a codec it cannot satisfy falls back to a lossy rendering instead of raising.
 
-Progress output is never worth a traceback. The work is already done by the time we are
-describing it.
+Progress output is never worth a traceback.
 """
 
 import sys

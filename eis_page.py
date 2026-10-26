@@ -3,21 +3,17 @@
 """
 What the procurement page says about the procurement — title, buyer, deadline, value, CPV.
 
-The downloader already fetches this page; it once read the anti-forgery token and the
-document arrays out of it and threw the rest away. That was a real loss: a procurement
-below the publication duty carries no register notice, and for those this page is the only
-place the metadata exists at all. The register cannot supply what it never received.
+A procurement below the publication duty carries no register notice, and for those this
+page is the only place the metadata exists at all.
 
     from eis_page import parse_notice, resolve_eis_id
     notice = parse_notice(html, "178345")       # no network — html comes from the caller
     pid    = resolve_eis_id(iub_notice_html)    # IUB's API never returns the EIS URL
 
-EVERY PARSER HERE IS A PURE FUNCTION. The transport lives in eis_fetch.py and is passed in
-where it is needed, so the parsing can be tested against saved HTML without a runner, an
-address draw, or a live portal — which is also the only way these rules can be regression-
-tested at all, given that a third of runners cannot reach EIS.
+Every parser here is a pure function. The transport lives in eis_fetch.py and is passed in
+where it is needed, so the parsing can be tested against saved HTML without a live portal.
 
-THE CONTACT PERSON NEVER ENTERS THE PARSER. Unlike the IUB search API, this page names a
+The contact person never enters the parser. Unlike the IUB search API, this page names a
 human being with a phone number and an e-mail. Any label matching `_PERSONAL` is dropped
 before the value is even read, so the no-personal-data property is held by construction
 rather than by a downstream filter someone can forget. This is about a named individual's
@@ -33,20 +29,13 @@ BASE = "https://www.eis.gov.lv"
 PAGE = BASE + "/EKEIS/Supplier/Procurement/%s"
 IUB_NOTICE = "https://eformsb.pvs.iub.gov.lv/show/%s"
 
-# WHAT PROVES A PAGE IS A PUBLISHED PROCUREMENT — and what merely used to.
+# What proves a page is a published procurement. A localized heading alone does not:
 #
-# The old rule was the Latvian heading `Iepirkuma pamatdati`. It is wrong twice over:
-#
-#   * EIS serves some real, complete tender pages IN ENGLISH, carrying the token and the
-#     document arrays while the Latvian heading is simply absent. `Accept-Language: lv`
-#     does not change it — the portal ignores the header. Under the old rule such a tender
-#     reads as unpublished.
-#   * An id that really is not published answers with a small redirect stub, which looks
+#   * EIS serves some complete tender pages in English, carrying the token and the
+#     document arrays without the Latvian heading `Iepirkuma pamatdati`. The portal
+#     ignores `Accept-Language`.
+#   * An id that is not published answers with a small redirect stub, which looks
 #     nothing like a full page missing one heading.
-#
-# It also matters beyond a parser detail: a large page without the Latvian heading was once
-# recorded as evidence of throttling, when it was the English rendering of the tender. That
-# difference decides whether the address or the portal gets blamed.
 #
 # So publication is proved structurally, in a way no translation can move: the page must
 # carry the anti-forgery token and the document-array declarations the platform emits on
@@ -65,21 +54,16 @@ def is_published(page):
     return any(mark in page for mark in PUBLISHED_MARKERS)
 
 
-# A THIRD ANSWER, NOT A SLOWER PATH TO ONE OF THE OTHER TWO.
+# A third answer, not a slower path to one of the other two.
 #
-# `is_published` distinguishes "this is the tender" from "this is not, yet" — and the caller
-# reasonably retries the second, because a draft becomes visible and a throttle passes. EIS
-# answers some ids with neither: a fixed page at its own path, `/EKEIS/Error.html`, saying
-# the procurement has no stage a guest may see at all. That is not a draft warming up and
-# not a throttle cooling down — the message is the platform's own explanation, chosen and
-# served instantly, not a timeout. Six more attempts spend five minutes proving what the
-# first answer already said.
+# `is_published` distinguishes "this is the tender" from "this is not, yet", and the caller
+# retries the second, because a draft becomes visible and a throttle passes. EIS answers
+# some ids with neither: a fixed page at its own path, `/EKEIS/Error.html`, saying the
+# procurement has no stage a guest may see at all. It is the platform's own answer, served
+# instantly, and retrying it does not change it.
 #
 # The heading is bilingual on one line, `Pieeja liegta / Access Denied`, which is EIS's own
-# fixed template for this state rather than a phrase this project chose — the same
-# language-proof reasoning `is_published` already relies on. Measured on EIS 179817 and
-# 179872, 2026-08-18: both notices, both answering instantly with this page on every draw,
-# never once returning a procurement.
+# fixed template for this state, so it does not depend on the page language.
 ACCESS_DENIED_MARKERS = ("Pieeja liegta / Access Denied",)
 
 
@@ -88,7 +72,7 @@ def is_access_denied(page):
     return bool(page) and any(mark in page for mark in ACCESS_DENIED_MARKERS)
 
 
-# A FOURTH ANSWER, AND THE ONLY ONE THAT MEANS "COME BACK LATER".
+# A fourth answer, and the only one that means "come back later".
 #
 # EIS puts a bot check in front of the portal when it has been asked for a great deal in a
 # short time. It answers HTTP 200 with a full HTML page titled `Pārbaude pret robotiem` —
@@ -100,12 +84,8 @@ def is_access_denied(page):
 # procurement has. That is what stops it being written down as fact. But refusing it makes
 # it indistinguishable from an id that is genuinely not published, and those two call for
 # opposite behaviour: an unpublished id may publish tomorrow and is worth re-walking, while
-# a bot check means STOP ASKING and come back later — the same request will keep returning
-# this page, faster than the portal can be helped by being asked again.
-#
-# Measured 2026-08-19: it appeared after roughly 30 000 requests in a day at 0.25-0.4 s
-# apart, and then answered 38 consecutive ids this way while those procurements were
-# demonstrably live — the census had read them hours earlier.
+# a bot check means stop asking and come back later — the same request will keep returning
+# this page.
 ROBOT_CHECK_MARKERS = ("Pārbaude pret robotiem",)
 
 
@@ -132,8 +112,7 @@ _TAG = re.compile(r"<[^>]+>")
 #   competition   https://eformsb.pvs.iub.gov.lv/show/<uuid>
 #   planning      https://eforms.pvs.iub.gov.lv/planning-publications/view/<kind>/<id>
 #
-# Matching only the first read a printed planning link as no link at all. Note the hosts
-# differ by one letter — `eformsb` against `eforms` — which is why this is two patterns
+# Both are matched. Note the hosts differ by one letter — `eformsb` against `eforms` — which is why this is two patterns
 # and not one with an alternation in the path.
 _IUB = re.compile(r"https://eformsb\.pvs\.iub\.gov\.lv/show/([0-9a-f\-]{36})")
 _IUB_PLANNING = re.compile(
@@ -172,7 +151,7 @@ def embedded_array(page, name, strict=False):
 
     `raw_decode` rather than a regex: these payloads carry nested objects, escaped quotes
     and Latvian text, and a non-greedy `\\[.*?\\]` truncates at the first inner bracket —
-    which is exactly how an earlier reader silently lost document rows. The decoder
+    and loses document rows without an error. The decoder
     consumes one complete JSON value and reports where it ended.
 
     `strict` picks which failure is worse, and both answers are right somewhere. A DOWNLOAD
@@ -257,10 +236,9 @@ def parse_documents(page):
 # Every field this tool promises, and the three ways to find it: the platform's own field
 # id first, then the Latvian label, then the English one.
 #
-# THE ID COMES FIRST AND THAT IS THE WHOLE POINT. It is the same string whichever language
-# EIS decides to serve, and it survives a rewording of the visible label. The labels stay as
-# a fallback for the day the platform renames an id — losing a deadline silently is the
-# failure this ordering exists to prevent. Both label spellings were read off live pages.
+# The id comes first: it is the same string whichever language EIS serves, and it survives
+# a rewording of the visible label. The labels are a fallback for when the platform renames
+# an id, so a deadline is not lost silently. Both label spellings were read off live pages.
 FIELDS = {
     "ref":         ("IdentificationNumber", "Iepirkuma identifikācijas numurs",
                     "Identification number"),
@@ -317,16 +295,9 @@ _CPV_ITEMS = re.compile(r"CpvAdditionals_items\s*=\s*")
 def cpv_additional(fields):
     """Every CPV code beyond the main one, as `code caption`, in page order.
 
-    A procurement is classified by its CPV codes, and the main one is not all of them:
-    measured over 169 collected pages, 70 carry at least one more — road works under a
-    street-rebuild, design services under construction, laboratory reagents under a
-    supplies notice. They were parsed and thrown away, because the page ships them as a
-    repeater widget and the field the parser grabbed is the widget's JavaScript.
-
-    The codes sit in `CpvAdditionals_items`, a JSON array, each entry's `Title` being the
-    code and its caption. `raw_decode` is used rather than a bracket regex: a caption may
-    contain a bracket, and a regex that stops at the first one truncates the list silently,
-    which is the failure this whole file keeps refusing.
+    The page ships them as a repeater widget: `CpvAdditionals_items`, a JSON array whose
+    entries' `Title` is the code and its caption. `raw_decode` rather than a bracket regex,
+    because a caption may contain a bracket and the list would be truncated silently.
     """
     slab = field(fields, "_cpv_extra")
     if not slab:
@@ -378,12 +349,9 @@ def parse_notice(page, pid, register_uuid=None):
     buyer = field(fields, "_buyer") or ""
     buyer_name, _, buyer_reg = buyer.partition(", reģ. numurs:")
 
-    # The additional CPV codes, extracted BEFORE the widget that carried them is cut out of
+    # The additional CPV codes, extracted before the widget that carried them is cut out of
     # `fields`. The page renders them as a repeater, so the raw "value" under those keys is
-    # kilobytes of the widget's JavaScript — 65% of every procurement.json, measured over
-    # 169 collected pages, and shipped three times per tender: folder, archive, shards.zip.
-    # While the script was the only carrier of the codes it had to stay. Now that they are
-    # first-class it carries nothing, so what stays under the keys is what the page shows a
+    # kilobytes of the widget's JavaScript. It is replaced with what the page shows a
     # person — the codes themselves. `fields` still records that the field exists.
     cpv_extra = cpv_additional(fields)
     _fid, *_cpv_labels = FIELDS["_cpv_extra"]
@@ -398,7 +366,7 @@ def parse_notice(page, pid, register_uuid=None):
         "buyer": buyer_name.strip() or None,
         "buyer_reg": buyer_reg.strip() or None,
         "iub_uuid": register_uuid or (iub.group(1) if iub else None),
-        # HOW REGISTER MEMBERSHIP WAS ESTABLISHED, AND WHETHER IT WAS ESTABLISHED AT ALL.
+        # How register membership was established, and whether it was established at all.
         #
         #   "discovery"  the caller found this procurement BY searching the register, so it
         #                is in the register and there is nothing to infer
@@ -406,35 +374,13 @@ def parse_notice(page, pid, register_uuid=None):
         #                publication — and that link is the evidence
         #   "unverified" the page printed neither, and nobody asked the register
         #
-        # This field exists because the page cannot answer the question and used to be made
-        # to. Measured over 169 collected pages, 43 carried no register link; six were then
-        # fetched live and five had no iub.gov.lv URL of any shape anywhere in the HTML —
-        # on procurements the register demonstrably carries, since discovery is what found
-        # them. So a missing link is ordinary, and reading it as absence from the register
-        # was wrong in every one of those cases.
+        # The page cannot answer the question on its own: many pages carry no register link
+        # even when the register holds the procurement, so a missing link is ordinary and is
+        # not evidence of absence from the register.
         "register_check": ("discovery" if register_uuid
                            else "page-link" if (iub or planning)
                            else "unverified"),
-        # SO THIS MEANS "NOT CONFIRMED TO BE IN THE REGISTER", NOT "ABSENT FROM IT" — and
-        # the difference has now been measured rather than argued. Walking ids 179550-179800
-        # and putting every page to the register itself, by identification number and by
-        # buyer:
-        #
-        #   129 published of 251 ids walked   the id space is about half live
-        #    66 page-link    ->  66 in the register,  0 not. The link never lied.
-        #    63 unverified   ->  38 in the register after all, 25 genuinely absent
-        #
-        # A fifth of what EIS publishes has no register notice — and the page alone would
-        # have accused twice that many. What the 25 are: 12 `Neregulēts iepirkums`, outside
-        # the publication duty, which is the premise this flag used to assert without
-        # evidence; 7 market consultations; 4 closed competitions under a dynamic purchasing
-        # system whose parent was published once; 2 carrying 2025 references, whose register
-        # entry simply predates the window checked.
-        #
-        # Only 5 of the 25 publish a value: 9,999 / 15,000 / 23,500 / 30,000 / 90,909 EUR.
-        # Small, as "below the publication duty" would predict — the old premise turns out
-        # to hold for the population it was actually about, and not for the one this flag
-        # was selecting.
+        # So this means "not confirmed to be in the register", not "absent from it".
         "eis_only": register_uuid is None and iub is None and planning is None,
         "link": PAGE % pid,
         "source": "EIS",

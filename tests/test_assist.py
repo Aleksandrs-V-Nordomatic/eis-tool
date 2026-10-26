@@ -180,7 +180,7 @@ class Providers(unittest.TestCase):
         self.addCleanup(shutil.rmtree, self.pack, True)
 
     def test_the_default_reader_needs_no_key(self):
-        # The whole point: the pipeline must not depend on one person's account.
+        # The pipeline must not depend on one person's account.
         _, needs_key, _, _ = assist.PROVIDERS[assist.DEFAULT_PROVIDER]
         self.assertFalse(needs_key)
         self.assertEqual(assist.DEFAULT_PROVIDER, "tesseract")
@@ -230,32 +230,24 @@ class LocalOcr(unittest.TestCase):
 
 
 class ScanLaneNeverFailsTheRun(unittest.TestCase):
-    """The lane reads what the extractor could not, and may not cost a tender either way.
-
-    A pack whose scans stay unread is exactly as complete as it was before this lane existed,
-    so `read_scans` returns 0 whatever happens inside it. The guard used to name one exception
-    class, which made the promise depend on what a dependency chose to raise: PyMuPDF raises
-    its own hierarchy rather than RuntimeError, and one oversized page threw
-    `code=5: Overly large image` past the handler and marked a tender carrying 1.4 million
-    extracted characters as failed.
-    """
+    """Whatever the scan lane raises, the tender is not failed for it."""
 
     def lane(self, exc):
-        import eis_tool
+        import process_batch
         original = assist.run
         self.addCleanup(setattr, assist, "run", original)
 
         def explode(*a, **kw):
             raise exc
         assist.run = explode
-        return eis_tool.read_scans("pack")
+        return process_batch.read_scans("pack")
 
     def test_a_dependency_raising_its_own_class_does_not_fail_the_run(self):
         class FzError(Exception):
             pass
         self.assertEqual(self.lane(FzError("code=5: Overly large image")), 0)
 
-    def test_the_documented_case_still_holds(self):
+    def test_a_missing_reader_does_not_fail_the_run(self):
         self.assertEqual(self.lane(RuntimeError("tesseract is not installed")), 0)
 
     def test_nor_does_anything_else_it_might_raise(self):
@@ -269,9 +261,8 @@ if __name__ == "__main__":
 class ScannedImages(unittest.TestCase):
     """A scan does not always arrive as a PDF.
 
-    Day one: 26 files reported "no text layer" and another 52 were jpg/png that no decoder
-    tried at all. Buyers photograph or scan a page and attach the picture. Same document,
-    different wrapper — same queue.
+    Buyers photograph or scan a page and attach the picture, which no decoder tries. Same
+    document, different wrapper — same queue.
     """
 
     def _queue(self, name, reason):
@@ -297,7 +288,7 @@ class ScannedImages(unittest.TestCase):
         self.assertEqual(skip[0]["skipped"], "reason-not-selected")
 
     def test_a_file_found_inside_an_archive_is_reachable_by_its_path(self):
-        # normalize now names where the bytes are; without that these were 20 of 26 scans.
+        # normalize names where the bytes are, so a scan inside an archive can be sent.
         entry = {"file": "current/Pack/in.edoc/Skenets.pdf", "bytes": 900,
                  "sha256": "b" * 64, "reason": "no text layer — a scan",
                  "path": "normalized/_unpacked/ab12/Skenets.pdf"}

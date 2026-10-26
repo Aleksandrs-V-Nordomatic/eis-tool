@@ -8,23 +8,17 @@ writing under another's folder is a failure that succeeds: the upload returns 20
 is valid, and a reader is handed the wrong country's tenders with nothing anywhere saying so.
 
 This repository is the Latvian tool and reads EIS only. The check below still runs, and
-still refuses, because a country tool that assumes its own country is a country tool that
-cannot say when it was pointed at the wrong drive.
+still refuses, so the tool can say when it was pointed at the wrong destination.
 
 So the country is resolved once, here, and both the source and the destination are derived
-from it rather than configured beside it. Configuring them separately is what makes the
-mismatch expressible in the first place.
+from it rather than configured beside it, which makes the mismatch impossible to express.
 
-THE DESTINATION IS DERIVED, NOT CONFIGURED. `GRAPH_DEST_ROOT` names the project's runtime
-folder — the `work/` a reader knows — and the country code is appended to it. It is not
-enough to ask the deployment to set `GRAPH_DEST_ROOT` to a folder ending in a code and
-trust it: that is
-the same two-places-to-get-right this file exists to remove, and the first symptom of
-getting it wrong is a day of one country's tenders sitting in another's folder. A root that
-already ends in a country code is therefore refused rather than appended to, because
-`work/LV/LV` is the other way the same mistake shows up.
+The destination is derived, not configured. `GRAPH_DEST_ROOT` names the project's runtime
+folder — the `work/` a reader knows — and the country code is appended to it. A root that
+already ends in a country code is refused rather than appended to, because `work/LV/LV` is
+the other way the same mistake shows up.
 
-THE SOURCE IS DERIVED TOO. A code with no source module is refused, never guessed at and
+The source is derived too. A code with no source module is refused, never guessed at and
 never quietly served by a reader written for somewhere else.
 """
 
@@ -32,11 +26,9 @@ import re
 
 # The country this repository fetches, and the modules that read its portal.
 #
-# ONE COUNTRY PER REPOSITORY, AND THE TABLE STAYS. It would be shorter to delete this file
-# in a single-country tool and hard-code LV, and that is exactly what must not happen: the
-# table is what makes `resolve` able to REFUSE. A run that names no country, or names the
-# wrong one, stops here with a sentence instead of quietly fetching Latvia and filing it
-# under somebody else's folder. That guard is worth more than the line it costs.
+# One country per repository, and the table stays: it is what makes `resolve` able to
+# refuse. A run that names no country, or names the wrong one, stops here with a sentence
+# instead of quietly fetching Latvia and filing it under somebody else's folder.
 #
 # Making the next country's tool: fork this repository, replace the entry below and the two
 # modules it names, and change the name and the README. Nothing else in the tool learns a
@@ -56,9 +48,8 @@ class Mismatch(ValueError):
 def resolve(explicit=None, environ=None):
     """The run's country, from the flag or from `EIS_COUNTRY`. Never a default.
 
-    There is deliberately no fallback, not even to this repository's one country. A default
-    would mean a run launched without the flag publishes under whichever folder the tool
-    guessed, and the way that surfaces is a morning of the wrong country's cards.
+    There is deliberately no fallback, not even to this repository's one country: a run
+    launched without the flag would publish under whichever folder the tool guessed.
     """
     environ = {} if environ is None else environ
     code = (explicit or environ.get("EIS_COUNTRY") or "").strip().upper()
@@ -111,12 +102,9 @@ def destination(base, code):
 def parser_files(code):
     """The files that decide this country's facts, for the version stamped beside them.
 
-    `changes` records a parser version so that an improvement to a page reader — one more
-    spelling of a label, a field that used to come back null — is not reported as an
-    amendment on every procurement in the corpus. That only works if the version follows
-    the reader the run actually used: stamping one country's digest onto another's
-    fingerprint makes an `eis_page` edit invisible and an unrelated edit a false alarm, in
-    the same run and for the same reason.
+    `changes` records a parser version so that a change to a page reader is not reported as
+    an amendment on every procurement. That only works if the version follows the reader
+    the run actually used.
     """
     return (SOURCES[resolve(code)]["page"] + ".py",)
 

@@ -2,7 +2,7 @@ name: image
 
 # Builds the toolchain image and pushes it to this repository's own registry.
 #
-# NO THIRD-PARTY ACTION HERE, DELIBERATELY. The repository allows GitHub-authored actions
+# No third-party action here, deliberately. The repository allows GitHub-authored actions
 # only, and the usual docker/build-push-action is not one. `docker build` and `docker push`
 # are already on the runner, so the policy costs nothing to keep.
 #
@@ -56,6 +56,6 @@ jobs:
           docker tag "$IMAGE:${{ github.sha }}" "$IMAGE:latest"
           docker push "$IMAGE:latest"
           echo "pushed $IMAGE:latest and :${{ github.sha }}"
-          # eis-shard.yml reads this path from a repository variable rather than carrying
+          # The workflows read this path from a repository variable rather than carrying
           # an owner's account name in the tree. Say what to set it to.
           echo "::notice::set repository variable TOOLCHAIN_IMAGE=$IMAGE:latest"

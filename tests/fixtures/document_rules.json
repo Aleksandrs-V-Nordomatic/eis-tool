@@ -1,0 +1,21 @@
+{
+  "extensions": {
+    "CAD files": ["dwg", "dxf"],
+    "Photos and scans": ["jpg", "png"]
+  },
+  "eis_generated": {"name": "^\\d{5,7}_[A-Z]+\\.[A-Z]+_[\\d_]+$", "record": "prasib", "kind": "EIS requirement form"},
+  "generic_record": "iepirkuma prieksmeta .{0,20}prasibas",
+  "name_rules": [
+    {"kind": "Answers to bidders' questions", "pattern": "atbild|jautaj"},
+    {"kind": "Tender regulations", "pattern": "nolikum"},
+    {"kind": "Technical specification", "pattern": "tehnisk\\w* specifik|darba uzdevum"},
+    {"kind": "Drawing sheets", "pattern": "rasej|\\bplan[siua]?\\b"},
+    {"kind": "Bid forms", "pattern": "veidlap|pieteikum"},
+    {"kind": "Amendments", "pattern": "grozij", "weak": true},
+    {"kind": "Photos and scans", "pattern": "\\bfoto", "late": true},
+    {"kind": "Unknown", "pattern": "pielikum", "weak": true}
+  ],
+  "section_codes": {"kind": "Drawing sheets", "pattern": "(?<![A-Za-z])(AR|VAS|AVK)(?![A-Za-z])"},
+  "skip": ["CAD files", "Photos and scans", "Bid forms", "Drawing sheets"],
+  "archives": ["zip", "7z", "rar"]
+}

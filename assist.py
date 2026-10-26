@@ -7,32 +7,19 @@ Read the files the deterministic extractor honestly could not — and nothing el
     python3 assist.py --pack out --provider gemini     # a model, if a key is configured
     python3 assist.py --pack out --dry-run             # what would be read, and by what
 
-WHY THE DEFAULT READER IS A LOCAL ONE, AND NOT A MODEL. The first version of this file
-required `GEMINI_API_KEY`, which meant the pipeline depended on a personal account that
-nothing in this repository owns. That is a worse problem than an unread scan: a credential
-with no owner fails silently, at the worst moment, and cannot be handed over.
+The default reader is local: **Tesseract with the Latvian language pack**, installed in the
+toolchain image. It needs no account, no key and no billing relationship. It is worse than
+a frontier model on a bad scan and adequate on a clean one, and the queue is usually small,
+because the deterministic extractor reads most tenders whole.
 
-So the default reader is **Tesseract with the Latvian language pack, installed on the
-runner**. It needs no account, no key, no e-mail, no billing relationship and no
-migration plan. It is worse than a frontier model on a bad scan and entirely adequate on
-a clean one — and the volume argues it is enough: the deterministic extractor reads most
-tenders whole, leaving this lane an ordinarily empty queue. Buying a cloud dependency to
-serve a queue that is usually empty is the wrong trade.
+A hosted model is available for a scan Tesseract cannot read; it is one flag and one key,
+and `PROVIDERS` below is the only place that has to know it exists.
 
-A hosted model stays available for the day a scan defeats Tesseract; it is one flag and
-one secret, and `PROVIDERS` below is the only place that has to know it exists.
+The main path stays model-free: this step never touches a file the extractor could read,
+and never rewrites `normalized/`. It works on the queue the extractor already names:
+`unreadable_files` in `manifest_normalized.json`, each entry carrying a digest and a reason.
 
-WHY THIS DOES NOT BREAK THE "NO MODEL" RULE. The rule was always about the MAIN path: same
-bytes in, same text out, and a coverage claim that can be checked. That still holds — this
-step never touches a file the extractor could read, and never rewrites `normalized/`.
-
-What it works on is the queue the extractor already produces and names: `unreadable_files`
-in `manifest_normalized.json`, each entry carrying a digest and a reason. Today those are
-honest holes — a scanned PDF is reported `no text layer` and that is the end of it. A hole
-a person still has to open by hand is not more honest than a hole read by a model and
-labelled as such; it is only cheaper to defend.
-
-FOUR PROPERTIES MAKE IT SAFE TO KEEP:
+Four properties:
 
 **Quarantined.** Output lands in `llm/`, never in `normalized/`. Every entry is marked
 `llm-fallback`, so a downstream reader can always tell which characters a machine
@@ -40,19 +27,17 @@ transcribed from a picture and which a decoder recovered from a text layer. A co
 that requires located quotes must treat this text as a reason to look, never as the quote.
 
 **Cached by content.** The key is the file's sha256. A digest already answered is never
-sent again, so a re-run is byte-identical and costs nothing — determinism's honest cousin,
-and the reason a warm run still reports zero tokens like the deterministic core does.
+sent again, so a re-run is byte-identical and costs nothing.
 
-**Provenance or it did not happen.** Every answer is written beside a record of which
-provider, model and prompt produced it, and when. A transcription whose origin is unknown
-is worse than a gap, because a gap does not look like evidence.
+**Provenance.** Every answer is written beside a record of which provider, model and
+prompt produced it, and when.
 
-**Free by default, and bounded.** The provider is Google's free tier, which for EEA users
-carries the paid-tier data terms — the submitted documents are not used for training. Free
-quota is finite, so the run paces itself and stops cleanly: anything left over is marked
-`llm-deferred` and the next run picks it up. Running out of quota is not a failure.
+**Free by default, and bounded.** The hosted provider is Google's free tier, which for EEA
+users carries the paid-tier data terms — the submitted documents are not used for training.
+Free quota is finite, so the run paces itself and stops cleanly: anything left over is
+marked `llm-deferred` and the next run picks it up. Running out of quota is not a failure.
 
-NOT SENT, EVER: drawings (DWG/DXF) — a named non-goal with PDF duplicates in practice;
+Never sent: drawings (DWG/DXF) — a named non-goal with PDF duplicates in practice;
 files the extractor read perfectly well; and anything the caller did not ask for by reason.
 """
 
@@ -83,8 +68,8 @@ DEFAULT_REASONS = ("no text layer",)
 #
 # Some of those images will be photographs and logos. That costs nothing worth guarding
 # against: the local reader returns no text, the file is recorded as such, and the only price
-# is CPU seconds on a runner that is free. Guessing which image is a document would be
-# exactly the judgement about usefulness this project refuses to make.
+# is CPU seconds. Guessing which image is a document would be a judgement about usefulness,
+# which this project does not make.
 IMAGES = (".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp")
 
 # Vector drawings are a named non-goal, and rasterising one to guess at it is worse than
@@ -197,9 +182,8 @@ def gemini_send(blob, mime, model, api_key, timeout=180):
     # The HTTPError arm comes first and keeps its own meaning: 429 and 503 are the provider
     # saying the free tier is spent, which the caller counts and stops on, and retrying them
     # here would spend the loop re-asking a settled question. Everything below it is the
-    # transport, which says nothing about quota — and used to escape as a bare OSError past
-    # the per-file `except RuntimeError` that exists to keep one unreadable scan from ending
-    # the lane.
+    # transport, which says nothing about quota; it is raised as RuntimeError so the
+    # per-file `except RuntimeError` keeps one unreadable scan from ending the lane.
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             payload = json.loads(response.read().decode("utf-8", "replace"))
@@ -291,8 +275,7 @@ def tesseract_read(blob, mime, model, api_key, timeout=900):
 
 
 # The whole registry. Adding a reader is one entry here plus its function — callers,
-# manifests and the cache do not change, which is what makes swapping one a secret change
-# rather than a code change.
+# manifests and the cache do not change.
 PROVIDERS = {
     # name:      (function,        needs a key?, default model//languages,   size ceiling)
     "tesseract": (tesseract_read,  False,        OCR_LANGS,                  None),
@@ -455,7 +438,7 @@ def main(argv=None):
     for s in doc["skipped_files"][:10]:
         print("   skipped  %-52s %s" % ((s.get("file") or "?")[-52:], s["skipped"]))
     # Deferred work is not an error: the cache means the next run resumes, and a pack whose
-    # scans are unread is exactly as complete as it was before this step existed.
+    # scans are unread is still complete.
     return 0
 
 

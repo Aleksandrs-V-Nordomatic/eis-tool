@@ -2,13 +2,7 @@
 # -*- coding: utf-8 -*-
 """One retry policy, for every request this project makes.
 
-WHY THIS FILE EXISTS. It was written after a shard died 0.8 seconds into a run, on the
-first request of the day, holding a `http.client.RemoteDisconnected` that its own four-try
-retry loop had watched go past. The loop caught `urllib.error.URLError`. That is not a
-parent of `RemoteDisconnected`, so the retry was never entered — the loop was written
-against a failure this register does not produce, and blind to the one it does.
-
-The hierarchy, checked rather than remembered:
+A retry loop is only as good as the exceptions it catches. The hierarchy:
 
     RemoteDisconnected -> ConnectionResetError -> ConnectionError -> OSError
                        -> BadStatusLine        -> HTTPException
@@ -16,18 +10,12 @@ The hierarchy, checked rather than remembered:
     URLError  IS an OSError.  HTTPError IS a URLError.  socket.timeout IS an OSError.
     IncompleteRead, BadStatusLine and LineTooLong are HTTPException and NOT OSError.
 
-So the honest catch is `OSError` and `http.client.HTTPException`, and `urllib` alone can
-never be it: urllib wraps only `h.request()` in a URLError. The response is read in
+So the catch is `OSError` and `http.client.HTTPException`, and `urllib.error.URLError`
+alone never is: urllib wraps only `h.request()` in a URLError. The response is read in
 `h.getresponse()`, and whatever breaks there arrives bare.
 
-WHY IT IS SHARED RATHER THAN FIXED IN PLACE. Eleven call sites in this repository open a
-socket, and before this file each carried its own hand-written policy: some caught the
-wrong types, some caught nothing at all, and the two that behaved correctly did so only
-because they shell out to curl and inherit its `--retry`. The same defect had already been
-found and fixed once, in `eis_fetch.fetch`, whose own comment records it — and it was still
-present in four other places, including the delivery that runs after a full day of
-downloads. A rule that has to be re-derived at every call site is a rule that will be got
-wrong again. There is one policy here, and call sites do not get a vote on it.
+The policy is shared rather than written at each call site, because a rule that has to be
+re-derived at every call site is easy to get wrong in one of them.
 
 Standard library only, like everything on the fetch path.
 """
@@ -44,22 +32,18 @@ import urllib.request
 RETRYABLE_STATUS = frozenset({408, 425, 429, 500, 502, 503, 504})
 
 # The transport failures worth another attempt, as a tuple an `except` clause can take
-# directly. `urllib.error.URLError` is deliberately absent and is not an omission: it is a
-# subclass of OSError, and naming it instead of OSError is exactly the mistake this module
-# was written to stop. `http.client.HTTPException` is the half that is NOT an OSError —
-# RemoteDisconnected, IncompleteRead, BadStatusLine — and is the half that was being missed.
+# directly. `urllib.error.URLError` is deliberately absent: it is a subclass of OSError, and
+# naming it instead of OSError would miss `RemoteDisconnected`. `http.client.HTTPException`
+# is the half that is not an OSError — IncompleteRead, BadStatusLine.
 TRANSPORT_ERRORS = (OSError, http.client.HTTPException)
 
 TRIES = 5
-# Seconds before attempts 2..5. The EIS tender path already spends up to 300 s over six
-# attempts against this same class of failure, and that number was arrived at the hard way.
-# Discovery is one cheap request the entire run stands on, so it gets the same order of
-# magnitude rather than the 3 s it had — which is shorter than most portal hiccups and so
-# amounted to no patience at all.
+# Seconds before attempts 2..5: about a minute in all, long enough to outlast an ordinary
+# portal hiccup.
 BACKOFF = (2.0, 6.0, 15.0, 40.0)
-# Four shards start in the same second and make the identical first request. Without jitter
-# their four retries also land in the same second, which is the shape of a request that gets
-# refused rather than served. This is politeness as much as it is self-interest.
+# Jobs started together make the identical first request. Without jitter their retries also
+# land in the same second, which is the shape of a request that gets refused rather than
+# served.
 JITTER = 0.25
 RETRY_AFTER_CAP = 120.0
 
@@ -67,10 +51,8 @@ RETRY_AFTER_CAP = 120.0
 class Unreachable(Exception):
     """The transport gave up. Says nothing about the resource — only that we could not ask.
 
-    Kept distinct from every "the server answered, and the answer was no" outcome, because
-    the two must not be recorded the same way. A notice we could not reach is a gap in the
-    run; a notice the register says has no platform link is a fact about the procurement.
-    Collapsing them is how a short day comes to call itself complete.
+    Kept distinct from every "the server answered, and the answer was no" outcome: a notice
+    we could not reach is a gap in the run, while an answer is a fact about the procurement.
     """
 
 

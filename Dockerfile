@@ -1,15 +1,10 @@
 # The toolchain, pinned, so "same bytes in, same text out" covers the converters too.
 #
-# WHY THIS EXISTS, AND SPEED IS THE SMALLER HALF. `requirements.txt` is pinned exactly
-# because a floating PyMuPDF is a floating text layer — but LibreOffice and Tesseract were
-# installed by `apt-get` on every job, which fetches whatever Ubuntu is shipping that day.
-# LibreOffice is what reads the Word 97 attachments buyers still send, and its version
-# decides what that text looks like. So the determinism claim held for the Python half and
-# quietly did not for the rest.
-#
-# The smaller half: installing them took ~60 s per job and, on 2026-08-07, seven minutes when
-# the apt mirror was slow. A layer pull from the registry beside the runner is seconds and,
-# more to the point, the same every time.
+# `requirements.txt` is pinned exactly because a floating PyMuPDF is a floating text layer.
+# LibreOffice and Tesseract need the same treatment: installed by `apt-get` in each job they
+# would be whatever Ubuntu ships that day, and LibreOffice's version decides what the text of
+# a Word 97 attachment looks like. Baking them into an image fixes them, and a layer pull is
+# also faster and steadier than an apt install per job.
 #
 # Base is pinned by digest rather than by tag: `ubuntu:24.04` is a moving target, and a
 # moving base defeats the whole purpose of this file.
@@ -39,8 +34,7 @@ RUN python3 -m pip install --no-cache-dir --break-system-packages -r /tmp/requir
  && rm /tmp/requirements.txt
 
 # Fail the build rather than ship an image that cannot do the job. Each line here is
-# something a run depends on, and finding it missing on a runner costs a draw that reached
-# the portal — the scarcest thing this project has.
+# something a run depends on.
 RUN set -e; \
     curl --version > /dev/null; \
     git --version > /dev/null; \

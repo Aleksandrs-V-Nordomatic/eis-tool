@@ -1,0 +1,97 @@
+"""List and unpack the members of a downloaded archive: ZIP natively, 7z and RAR with 7-Zip."""
+
+import os
+import shutil
+import subprocess
+import zipfile
+
+import eis_fetch
+
+NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+SEVEN_ZIP_PLACES = (r"C:\Program Files\7-Zip\7z.exe", r"C:\Program Files (x86)\7-Zip\7z.exe")
+
+
+class Unreadable(Exception):
+    """The member list cannot be read."""
+
+
+def seven_zip():
+    found = os.environ.get("SEVEN_ZIP") or shutil.which("7z") or shutil.which("7z.exe")
+    if found:
+        return found
+    return next((p for p in SEVEN_ZIP_PLACES if os.path.exists(p)), None)
+
+
+MAGIC = (b"PK\x03\x04", b"7z\xbc\xaf\x27\x1c", b"Rar!\x1a\x07")
+
+
+def looks_like_archive(path):
+    """True when the file starts like a ZIP, 7z or RAR archive, whatever its name says."""
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(8)
+    except OSError:
+        return False
+    return any(head.startswith(m) for m in MAGIC)
+
+
+def members(path):
+    """Paths of the files inside an archive, with `/` as separator."""
+    if zipfile.is_zipfile(path):
+        try:
+            with zipfile.ZipFile(path) as z:
+                names = [_zip_name(info) for info in z.infolist() if not info.is_dir()]
+        except (zipfile.BadZipFile, OSError) as exc:
+            raise Unreadable(str(exc))
+        return [n for n in names if n]
+    binary = seven_zip()
+    if not binary:
+        raise Unreadable("7-Zip is not installed")
+    proc = subprocess.run([binary, "l", "-slt", "-ba", "-sccUTF-8", path],
+                          capture_output=True, timeout=600, creationflags=NO_WINDOW)
+    if proc.returncode != 0:
+        raise Unreadable(proc.stderr.decode("utf-8", "replace")[:200] or "7-Zip failed")
+    out, current = [], {}
+    for line in proc.stdout.decode("utf-8", "replace").splitlines() + [""]:
+        if not line.strip():
+            if current.get("Path") and current.get("Folder") != "+":
+                out.append(current["Path"].replace("\\", "/"))
+            current = {}
+            continue
+        key, _, value = line.partition(" = ")
+        current[key.strip()] = value
+    return out
+
+
+def _zip_name(info):
+    """A member name decoded the way the archiver meant it."""
+    name = info.filename
+    if not info.flag_bits & 0x800:
+        try:
+            name = name.encode("cp437").decode("utf-8")
+        except (UnicodeEncodeError, UnicodeDecodeError):
+            pass
+    return name.replace("\\", "/")
+
+
+def extract(path, member, dest):
+    """Write one member of the archive to `dest`."""
+    if not eis_fetch.safe_member(member):
+        raise Unreadable("unsafe member path %r" % member)
+    if zipfile.is_zipfile(path):
+        with zipfile.ZipFile(path) as z:
+            info = next((i for i in z.infolist() if _zip_name(i) == member), None)
+            if info is None:
+                raise Unreadable("no member %r" % member)
+            with z.open(info) as src, open(dest, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+        return
+    binary = seven_zip()
+    if not binary:
+        raise Unreadable("7-Zip is not installed")
+    with open(dest, "wb") as dst:
+        proc = subprocess.run([binary, "e", "-so", "-sccUTF-8", path, member],
+                              stdout=dst, stderr=subprocess.PIPE, timeout=1800,
+                              creationflags=NO_WINDOW)
+    if proc.returncode != 0:
+        raise Unreadable(proc.stderr.decode("utf-8", "replace")[:200] or "7-Zip failed")

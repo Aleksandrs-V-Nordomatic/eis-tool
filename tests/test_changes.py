@@ -103,10 +103,8 @@ class NotAChange(unittest.TestCase):
 class TheSameTenderInAnotherLanguage(unittest.TestCase):
     """EIS serves the same procurement in Latvian or in English and the caller cannot choose.
 
-    Measured on one tender fetched four times in one morning: the downloader asked for
-    Latvian first every time and was answered in English twice. Every field whose value is a
-    display string moves together when that happens, and reporting ten amendments that did
-    not happen is how a reader learns to stop reading the file.
+    Every field whose value is a display string moves together when the language flips, and
+    none of those moves is an amendment.
     """
 
     LV = {"fields": {"Iepirkuma statuss": "Izsludināts"},
@@ -286,11 +284,11 @@ class PipelineVersion(unittest.TestCase):
         self.assertNotEqual(changes.pipeline_version(self.root), before)
 
     def test_a_file_that_cannot_change_the_text_does_not_move_it(self):
-        # The delivery, the diff and the tests are edited constantly and none of them can
-        # change a character of the Markdown. Tracking them would re-upload every document of
-        # every tender ever fetched for a corrected comment.
+        # The delivery, the diff and the tests cannot change a character of the Markdown.
+        # Tracking them would re-upload every document of every tender for a corrected
+        # comment.
         before = changes.pipeline_version(self.root)
-        self.write("deliver_graph.py", "rewritten\n")
+        self.write("publish.py", "rewritten\n")
         self.write("changes.py", "rewritten\n")
         self.assertEqual(changes.pipeline_version(self.root), before)
 
@@ -303,10 +301,8 @@ class PipelineVersion(unittest.TestCase):
 class ANewParserIsNotAnAmendment(unittest.TestCase):
     """The facts are read by `eis_page`, and improving it must not accuse every buyer at once.
 
-    A spelling added to a label map, a field that used to come back null — one such edit
-    changes facts across the whole corpus in a single day. Compared blind, that is an
-    amendment reported for every tender in the register, from our own side. It is the page
-    language all over again, and it gets the same treatment: not compared, and said out loud.
+    A spelling added to a label map changes facts across the whole corpus at once. Like a
+    page-language flip, it gets the same treatment: not compared, and said out loud.
     """
 
     def state(self, parser, facts=None):

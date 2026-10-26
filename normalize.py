@@ -7,35 +7,31 @@ Extract the full text of a tender, deterministically, in about a minute.
 
 Three properties are load-bearing, in this order.
 
-NOTHING USEFUL MAY VANISH. The rule that makes this provable is that usefulness is never
+Nothing useful may vanish. The rule that makes this provable is that usefulness is never
 judged. Judging content would need a model; instead each file is classified by whether a
 deterministic decoder can recover characters from it. Everything readable is extracted in
 full and never filtered. Everything unreadable is listed by name, size and digest, so a gap
 is visible rather than silent. No file is ever dropped on a guess about its importance.
 
-SECONDS FOR A NORMAL TENDER, MINUTES FOR THE WORST CASE. A median tender is a handful of
+Seconds for a normal tender, minutes for the worst case. A median tender is a handful of
 DOCX and PDF and takes seconds. The worst case is a building project shipped as one large
 archive — hundreds of files, most of them PDF — and it runs end to end in a couple of
 minutes, most of that PDF text extraction and archive unpacking.
 
-DETERMINISTIC, NO MODEL. Same bytes in, same text out. No LLM, and no OCR on this path:
+Deterministic, no model. Same bytes in, same text out. No LLM, and no OCR on this path:
 tender PDFs carry a text layer, so OCR would buy nothing here while making the output
 depend on an engine's version. Dependencies are pinned exactly (requirements.txt) and walk
-orders are sorted, because "deterministic" must hold across installs and across time, not
-merely within one lucky machine.
+orders are sorted, so the result holds across installs and across time.
 
-WHY PDF TABLE DETECTION IS GONE. It was the single heuristic in the extraction path, and it
-earned its removal three times over: it cost orders of magnitude more time; it recovered no
-words that plain extraction had missed, because table text is already in the text layer;
-and on the rotated text in drawing title blocks it emitted characters backwards, which
-plain extraction reads correctly. What detection added was grid layout, at great cost, with
-corruption. Tables in DOCX/XLSX/PPTX are still extracted: those formats declare their
+No PDF table detection. Table text is already in the text layer, so detection recovers no
+words; it costs orders of magnitude more time and emits the rotated text in drawing title
+blocks backwards. Tables in DOCX/XLSX/PPTX are still extracted: those formats declare their
 structure, so reading it is exact and free.
 
-WHY PDF IMAGES ARE OFF BY DEFAULT. A text extract cannot use a raster, and extracting them
-adds a great many megabytes and not one character. `--with-images` restores them.
+PDF images are off by default. A text extract cannot use a raster, and extracting them
+adds a great many megabytes and not one character. `--with-images` turns them on.
 
-ARCHIVES ARE UNPACKED, WITH LIMITS. Buyers ship the specification inside a ZIP or a 7z, and
+Archives are unpacked, with limits. Buyers ship the specification inside a ZIP or a 7z, and
 those nest — an archive holding an archive holding the project. Treating one as opaque
 leaves a tender looking documented and unread at once, the worst state because it is
 invisible. Depth, file count and expanded size are capped so a bomb fails loudly instead of
@@ -53,8 +49,8 @@ import time
 import zipfile
 
 # Signed Latvian containers nest: a 7z holds a ZIP, the ZIP holds an .edoc, and that .edoc
-# holds another .edoc. At depth 3 three real documents went unread. Expansion is still
-# bounded by member count and byte budget, so raising this cannot let an archive bomb win.
+# holds another .edoc. Expansion is also bounded by member count and byte budget, so this
+# depth cannot let an archive bomb win.
 MAX_DEPTH = 6
 MAX_MEMBERS = 5000
 MAX_EXPANDED = 8 * 1024 ** 3          # 8 GB — a runner has ~14 GB free
@@ -83,11 +79,9 @@ ARCHIVES = {".zip", ".7z"}
 def slug(name, limit=80):
     """Filesystem-safe name that stays unique under truncation.
 
-    Plain truncation destroyed a file: two archive members sharing their first 80
-    characters converged on one output path, the second silently overwrote the first, and
-    nothing appeared in the gap list — the one failure mode the audit trail cannot see.
-    Truncation therefore appends a digest of the full name, and the extension survives
-    because it is sniff()'s last resort for files without a magic signature.
+    Plain truncation would let two names sharing their first 80 characters converge on one
+    path, the second silently overwriting the first. Truncation therefore appends a digest
+    of the full name, and the extension survives because sniff() falls back on it.
     """
     s = re.sub(r"[^\w\-. ]+", "_", name, flags=re.UNICODE).strip(" ._") or "file"
     if len(s) <= limit:
@@ -129,8 +123,7 @@ def sniff(path):
     if head[:4] == b"\xd0\xcf\x11\xe0":
         return _ole_subtype(path)
     # `mimetype` is the mandatory first member of ASiC/ODF containers (.edoc among them):
-    # a short plain-text media type. Twenty-five of them were flooding the gap list as
-    # "unknown", which is noise exactly where silence must be meaningful.
+    # a short plain-text media type, read as text so it does not crowd the gap list.
     if os.path.basename(path) == "mimetype" and head[:16].isascii():
         return ".txt"
     return os.path.splitext(path)[1].lower().strip(")]}, ")
@@ -153,26 +146,17 @@ def _ole_subtype(path):
     if utf16("PowerPoint Document") in head:
         return ".ppt"
     # Other things use OLE2 too — MicroStation .dgn drawings among them. Guessing ".doc"
-    # sent a CAD file to LibreOffice and reported the refusal as a conversion failure,
-    # which describes the wrong problem. An unknown container says so.
+    # would send a CAD file to LibreOffice and report the wrong problem. An unknown
+    # container says so.
     return ""
 
 
 def is_container_part(member):
     """Is this archive member the container's own plumbing rather than a document?
 
-    A Latvian `.edoc` is an ASiC-E container: a ZIP whose standard reserves `mimetype` at
-    the root and everything under `META-INF/` for the format itself — the media type and
-    the XAdES signature parts. They carry no tender content.
-
-    On a deeply nested signed container most of the entries produced are this plumbing
-    rather than documents. Left in, a signed tender pads the reading packet with signature
-    XML and inflates every document count on the way. Taken out, they are still listed — as
-    packaging, never dropped — because "nothing vanishes" is the claim this file keeps.
-
-    This is not a judgement about usefulness, which stays forbidden. It is the format
-    stating which of its own members are structure, the same way a ZIP's central directory
-    is not a file.
+    A Latvian `.edoc` is an ASiC-E container whose standard reserves `mimetype` and
+    everything under `META-INF/` for the media type and the signature parts. They carry no
+    tender content and are listed as packaging, never dropped.
     """
     return member == "mimetype" or member.startswith("META-INF/")
 
@@ -286,7 +270,7 @@ W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
 def _docx_numbering(path):
     """The numbering definitions Word keeps out of the text, read straight from the package.
 
-    WHY THIS IS A DUMP AND NOT A RENDERER. Printing a Word number means implementing lvlText
+    A dump, not a renderer. Printing a Word number means implementing lvlText
     templates, formats, restarts and level overrides — a real tail of edge cases. Nobody
     downstream needs the printed number from us; they need enough to compute the one they
     want, and to know when they cannot. So this hands over `start`, `numFmt`, `lvlText`,
@@ -347,17 +331,16 @@ def _numpr_of(pPr):
         el = numPr.find(W + tag)
         return el.get(W + "val") if el is not None else None
 
-    # ilvl stays None when Word did not write one. It used to be filled with 0, which is a
-    # different claim: "this paragraph is at the top level" rather than "the file does not say".
-    # A consumer computing a clause number from a fabricated depth gets a confident wrong
-    # answer, which is the one outcome this whole sidecar exists to avoid.
+    # ilvl stays None when Word did not write one. A 0 would claim "this paragraph is at the
+    # top level" rather than "the file does not say", and a clause number computed from it
+    # would be confidently wrong.
     return val("numId"), val("ilvl")
 
 
 def _style_numbering(style, styles):
     """The numbering a paragraph inherits from its style, following `w:basedOn` upwards.
 
-    WHY THIS BRANCH EXISTS. Word resolves a paragraph's number in order: the paragraph's own
+    Word resolves a paragraph's number in order: the paragraph's own
     `numPr`; failing that its style's; failing that the style it is based on, and so on up.
     A template that numbers through styles leaves every paragraph bare, and reading only the
     paragraph reports a document with no numbering at all — while the text cites its own
@@ -455,7 +438,7 @@ def docx_to_md(path, media_dir, stem):
             continue
         if len(rows) == 1:
             # These forms carry approval stamps, column captions and whole declarations as
-            # single-row tables; `< 2 rows` dropped their text entirely.
+            # single-row tables, so a one-row table is kept.
             parts.append("### Tabula %d\n\n| %s |" % (t_i, " | ".join(rows[0])))
             continue
         head, body = rows[0], rows[1:]
@@ -579,13 +562,10 @@ def pptx_to_md(path, media_dir, stem):
 
 
 def ifc_to_md(path):
-    """A BIM model is ISO-10303-21 text, not a binary, and calling it unreadable was wrong.
+    """The words in a BIM model, which is ISO-10303-21 text rather than a binary.
 
-    The geometry is numeric and carries no words; the words live in the quoted string
-    attributes — element names, property-set names, classifications. On a real 283 MB model
-    that is a great many distinct strings recovered in about a second, among them fire
-    resistance classes and their ratings. Strings are deduplicated and sorted so the output
-    is stable.
+    The words live in the quoted string attributes — element names, property-set names,
+    classifications. They are deduplicated and sorted so the output is stable.
     """
     quoted = re.compile(r"'([^']*)'")
     x2 = re.compile(r"\\X2\\((?:[0-9A-Fa-f]{4})+)\\X0\\")
@@ -615,8 +595,7 @@ def textual_to_md(path, kind):
     with open(path, "rb") as fh:
         blob = fh.read(MAX_MEMBER_BYTES)
     # Strict UTF-8 first; on failure, windows-1257, the Baltic legacy codepage. A bare
-    # "replace" here turned Būvdarbu into B�vdarbu — diacritics destroyed with no record
-    # of the damage, in files whose whole value is their words.
+    # "replace" would turn Būvdarbu into B�vdarbu with no record of the damage.
     try:
         raw = blob.decode("utf-8-sig")
     except UnicodeDecodeError:
@@ -638,10 +617,9 @@ def textual_to_md(path, kind):
 
 
 # ------------------------------------------------------------------------ legacy formats
-# Buyers still attach files saved by Word 97. Those carry ordinary tender text — one of them
-# held the procurement commission's answers to bidders — and leaving them unread is exactly
-# the silent gap this module exists to prevent. LibreOffice converts them without a model
-# and without a network call, so the guarantee of a deterministic, token-free extract holds.
+# Buyers still attach files saved by Word 97, and those carry ordinary tender text.
+# LibreOffice converts them without a model and without a network call, so the extract
+# stays deterministic and token-free.
 LEGACY = {".doc": "docx", ".xls": "xlsx", ".ppt": "pptx", ".rtf": "docx"}
 
 
@@ -716,9 +694,8 @@ def unpack(path, dest, kind, budget):
     binary = shutil.which("7z") or shutil.which("7za")
     if binary:
         return _unpack_7z_cli(binary, path, dest, budget)
-    # Fallback where the CLI is absent (a local Windows checkout). On the runner the CLI
-    # is installed and 20 seconds faster on the 484 MB acceptance archive, and using it
-    # removes one library-version axis from the "same bytes, same text" claim.
+    # Fallback where the CLI is absent (a local Windows checkout). The CLI is faster, and
+    # using it removes one library-version axis from the "same bytes, same text" claim.
     import py7zr
     with py7zr.SevenZipFile(path, "r") as z:
         names = z.getnames()
@@ -789,12 +766,10 @@ def convert(path, out_root, rel_stem, budget, depth=0):
     if kind in ARCHIVES:
         if depth >= MAX_DEPTH:
             return unreadable(rel_stem, path, "archive nested deeper than %d" % MAX_DEPTH)
-        # Scratch space, addressed by identity rather than by name. Naming it after the
-        # archive put the destination directory at the exact path of the archive file for
-        # any NESTED archive — rel_stem keeps the extension below the top level — so
-        # makedirs() hit the file and raised "File exists". That is how a nested archive
-        # holding the whole building project stayed unread while the run reported success.
-        # A hash also keeps the path short, which matters when unpacking deep trees.
+        # Scratch space, addressed by a hash rather than by name. Below the top level
+        # rel_stem keeps the extension, so a directory named after a nested archive would
+        # sit at the archive file's own path. A hash also keeps the path short, which
+        # matters when unpacking deep trees.
         inner = os.path.join(out_root, "_unpacked",
                              hashlib.sha1(rel_stem.encode("utf-8")).hexdigest()[:16])
         try:
@@ -854,9 +829,8 @@ def convert(path, out_root, rel_stem, budget, depth=0):
              "markdown_chars": len(md),
              "media_count": len(media),
              "preferred_for_agent": True}
-    # Beside the text, never inside it: document.md is byte for byte what it was before this
-    # existed, so digests and any consumer's quote rule are untouched. A consumer that does
-    # not know about the sidecar cannot notice it.
+    # Beside the text, never inside it, so document.md, its digest and any consumer's quote
+    # rule do not depend on the sidecar.
     if structure:
         structure_path = os.path.join(doc_dir, "structure.json")
         with open(structure_path, "w", encoding="utf-8") as fh:
@@ -919,10 +893,8 @@ def main(argv=None):
                 entries.append(entry)
             converted[path] = produced
 
-            # One line said only "unsupported", and the reason lived in a manifest inside a
-            # 465 MB artifact — so diagnosing a silently unread document meant downloading
-            # half a gigabyte. Reasons are printed here, deduplicated so 156 CAD drawings
-            # cost one line rather than 156.
+            # Reasons are printed here, not only in the manifest, deduplicated so many files
+            # with the same reason cost one line.
             tally = {}
             for e in produced:
                 tally[e["kind"]] = tally.get(e["kind"], 0) + 1
@@ -960,16 +932,14 @@ def main(argv=None):
         gaps.append(gap)
     gaps.sort(key=lambda g: -g["bytes"])
 
-    # Cleared last, and only when nobody asked to keep it. The scratch holds the ONLY copy of
-    # every file that came out of an archive, so removing it before the fallback lane has run
-    # is what limited that lane to 6 of 26 scans on a measured day.
+    # Cleared last, and only when nobody asked to keep it. The scratch holds the only copy of
+    # every file that came out of an archive, which the fallback lane needs.
     if not KEEP_UNPACKED:
         shutil.rmtree(os.path.join(out, "_unpacked"), ignore_errors=True)
 
     elapsed = time.time() - started
     # `entries` maps records to files and legitimately lists a file under every record
-    # that carries it; the headline numbers must not. Counting duplicates inflates the
-    # character total — precision theater in the one summary everyone reads.
+    # that carries it; the headline numbers must not, or the character total is inflated.
     unique = [e for e in entries if not e.get("also_listed_under")]
     doc = {"schema": 2, "procurement_id": manifest["procurement_id"],
            "entries": len(entries),

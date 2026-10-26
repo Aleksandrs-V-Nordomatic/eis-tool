@@ -2,14 +2,11 @@
 # -*- coding: utf-8 -*-
 """The page parser, tested without a portal.
 
-Every rule here was paid for once — by a wrong conclusion, a hand-collected deadline, or a
-silently truncated document list. The fixture reproduces the shapes that caused them: a
-tooltip inside a label attribute, a value in a bare text node beside its span, a nested
-object inside the document array, a contact person, and the same document listed in both
-sections.
+The fixture reproduces the shapes the parser has to handle: a tooltip inside a label
+attribute, a value in a bare text node beside its span, a nested object inside the document
+array, a contact person, and the same document listed in both sections.
 
-A third of runners cannot reach EIS, so a test that needed the portal would be a test that
-fails for reasons unrelated to the code. These need nothing.
+These tests need no network.
 """
 
 import json
@@ -92,8 +89,8 @@ var HistoricalDocuments_items = [
 """
 
 
-# The same tender as EIS actually served it on 2026-08-06: English labels, and the platform's
-# own field ids. Reproduced by hand from a live page rather than saved from it — the real page
+# The same tender as EIS serves it in English: English labels, and the platform's own
+# field ids. Reproduced by hand from a live page rather than saved from it — the real page
 # names a contact person, and a fixture is not a reason to republish somebody's phone number.
 ENGLISH_PAGE = """
 <html><head><title>EPS - Procurements - AAA 2099/1 - Basic data</title></head><body>
@@ -134,8 +131,8 @@ ENGLISH_PAGE = """
 class EnglishPage(unittest.TestCase):
     """EIS serves this tender in English, and `Accept-Language: lv` does not change it.
 
-    The old rule — the page must contain `Iepirkuma pamatdati` — calls this tender
-    unpublished. It is not: it carries the token, the document array and every field.
+    The page lacks `Iepirkuma pamatdati` and is still published: it carries the token, the
+    document array and every field.
     """
 
     def setUp(self):
@@ -155,13 +152,9 @@ class EnglishPage(unittest.TestCase):
         self.assertEqual(self.notice["award_criteria"], "Tender with lowest price")
 
     def test_the_estimated_value_survives_an_english_page(self):
-        # It did not. `_value` was keyed on `EstimatedValue`, an id EIS never emits, so the
-        # lookup fell through to the labels — where the English one was guessed as
-        # "Estimated value" and the page says "Expected contract price". Both routes missed
-        # and the tender came back worth nothing, with no error anywhere. Measured over 169
-        # collected pages: 14 of the 35 English ones published a value and lost all of it,
-        # the largest 5,445,650 EUR. The Latvian label happened to be right, which is why
-        # only half the corpus showed the hole.
+        # The English page labels it "Expected contract price", so only the platform id
+        # (`SubjectDescription_EstimatedContractValue`) or that exact label finds it; a miss
+        # returns None without an error.
         self.assertEqual(self.notice["value"], 5445650.0)
         self.assertEqual(self.notice["currency"], "EUR")
 
@@ -198,11 +191,9 @@ class EnglishPage(unittest.TestCase):
 class AccessDenied(unittest.TestCase):
     """EIS's fixed answer for an id with no stage a guest may see — not a draft, not a throttle.
 
-    Measured on EIS 179817 and 179872, 2026-08-18: `eis_fetch`'s retry loop spent its whole
-    five-minute, six-attempt budget on this page before giving up, because it reads exactly
-    like the ordinary "not published yet" case to a check that only asks what the page is
-    not. This is what the page actually is — served at `/EKEIS/Error.html`, instantly, every
-    time — and the fixture below is that page, trimmed.
+    To a check that only asks what the page is not, it reads like the ordinary "not
+    published yet" case, which a caller retries. It is served at `/EKEIS/Error.html`,
+    instantly, every time; the fixture below is that page, trimmed.
     """
 
     PAGE = (
@@ -247,8 +238,7 @@ class ParseNotice(unittest.TestCase):
 
     def test_unpublished_page_is_none_not_empty(self):
         # A page without the marker is a throttle, a stub or a wrong id — never a tender
-        # with no data. Returning {} here is what once produced "not published" about a
-        # tender that plainly was.
+        # with no data, so the answer is None rather than {}.
         self.assertIsNone(eis_page.parse_notice("<html>anything else</html>", "1"))
         self.assertIsNone(eis_page.parse_notice(None, "1"))
 
@@ -296,21 +286,15 @@ class ParseNotice(unittest.TestCase):
 
     def test_the_latvian_labels_are_the_ones_the_portal_prints(self):
         # This fixture's `for=` attributes are deliberately not platform ids, so every
-        # lookup here lands on the Latvian label — which makes it the only place a stale
-        # spelling shows up. Three were stale: the map asked for "Līguma izpildes termiņš",
-        # "Piedāvājuma izvēles kritērijs" and "Piegādātāju sanāksme" while EIS prints
-        # "Līguma darbības termiņš", "Izvēles metode" and "Apspriedes ar piegādātājiem
-        # termiņš". Their ids were right, so nothing was lost — the fallback was simply
-        # dead, in the exact case it exists to cover.
+        # lookup here lands on the Latvian label — which makes it the place a stale
+        # spelling in the label fallback shows up.
         self.assertEqual(self.notice["contract_duration"], "17 Mēneši")
         self.assertEqual(self.notice["award_criteria"], "Tikai zemākās cenas vērtēšana")
         self.assertEqual(self.notice["docs_until"], "2026-08-25 17:00")
 
     def test_the_additional_cpv_codes_are_read_out_of_the_widget(self):
-        # The page ships these as a repeater, so the "field" is kilobytes of JavaScript and
-        # the codes were dropped with it. Measured over 169 collected pages, 74 carry at
-        # least one — 172 codes in all, one tender holding 29. A tool that classifies by
-        # CPV was discarding the codes on nearly half of what it fetched.
+        # The page ships these as a repeater, so the "field" is kilobytes of JavaScript with
+        # the codes inside it.
         self.assertEqual(self.notice["cpv_additional"],
                          ["45200000-9 Izbūves darbi [1. kārta]",
                           "71000000-8 Arhitektu pakalpojumi"])
@@ -325,10 +309,9 @@ class ParseNotice(unittest.TestCase):
         self.assertEqual(len(self.notice["cpv_additional"]), 2)
 
     def test_the_widget_javascript_never_reaches_the_output(self):
-        # The slab was 65% of every delivered procurement.json — measured over 169 pages,
-        # 1.62 MB of 2.50 MB — and every tender ships its procurement.json three times:
-        # folder, archive, shards.zip. What stays under the widget's keys is what the page
-        # shows a person, so `fields` still says the field exists and what it held.
+        # The widget's script would be most of procurement.json. What stays under its keys
+        # is what the page shows a person, so `fields` still says the field exists and what
+        # it held.
         blob = json.dumps(self.notice, ensure_ascii=False)
         self.assertNotIn("CpvAdditionals_items", blob)
         self.assertNotIn("function", blob)
@@ -343,9 +326,8 @@ class ParseNotice(unittest.TestCase):
 
     def test_the_portal_prints_the_publication_date_under_several_captions(self):
         # `Izsludināts` on some procurements, `Izsludināts / publicēts` on others, and two
-        # more spellings in English. The id carried all of them, so nothing was lost — but
-        # the label fallback matched 111 of 134 Latvian pages and 23 of 35 English ones,
-        # which is a fallback that would not have caught the id moving.
+        # more spellings in English. The label fallback has to know every one of them, or it
+        # would not catch the id moving.
         for caption in ("Izsludin&#257;ts / public&#275;ts",
                         "Izsludin&#257;&#353;anas / public&#275;&#353;anas datums"):
             page = PAGE.replace("Izsludin&#257;ts:", caption + ":")
@@ -361,8 +343,7 @@ class ParseNotice(unittest.TestCase):
         self.assertTrue(without["eis_only"])
 
     def test_what_the_caller_knows_beats_what_the_page_shows(self):
-        # The page below prints no register link at all — the ordinary case: of 43 flagged
-        # pages, six were fetched live and five carried no iub.gov.lv URL of any shape.
+        # The page below prints no register link at all, which is an ordinary case.
         # When the caller reached it BY searching the register, that settles membership and
         # the page has no standing to contradict it.
         page = PAGE.replace("eformsb.pvs.iub.gov.lv", "x.example")
@@ -384,8 +365,7 @@ class ParseNotice(unittest.TestCase):
     def test_a_planning_publication_is_a_register_link_too(self):
         # A market consultation is published as a planning publication, on a host that
         # differs from the notice host by one letter and under a path that carries a
-        # numeric id instead of a uuid. Read off procurement 178056 live. Matching only the
-        # notice shape called this page absent from the register while it printed the link.
+        # numeric id instead of a uuid.
         page = PAGE.replace(
             "https://eformsb.pvs.iub.gov.lv/show/1b4e28ba-2fa1-11d2-883f-0016d3cca427",
             "https://eforms.pvs.iub.gov.lv/planning-publications/view/pil-discussion/"
@@ -411,14 +391,12 @@ class ParseNotice(unittest.TestCase):
 class RobotCheck(unittest.TestCase):
     """EIS asking us to slow down, dressed as a successful response.
 
-    Met on 2026-08-19 after about 30 000 requests in a day: the portal began answering with
-    HTTP 200 and a full page titled `Pārbaude pret robotiem`, for 38 consecutive ids whose
-    procurements were demonstrably live — a census had read them hours earlier. Nothing in
-    the status line said anything was wrong.
+    After many requests in a short time the portal answers HTTP 200 with a full page titled
+    `Pārbaude pret robotiem`, even for procurements that are live.
 
     Two properties matter, and they are different. It must not be mistaken for a tender —
-    which `is_published` already ensures, and which is what kept those 38 out of the data as
-    facts. And it must not be mistaken for an unpublished id, because the two call for
+    which `is_published` already ensures. And it must not be mistaken for an unpublished
+    id, because the two call for
     opposite behaviour: an unpublished id is worth walking again tomorrow, a bot check means
     stop asking now.
     """
@@ -440,8 +418,8 @@ class RobotCheck(unittest.TestCase):
 
     def test_it_is_not_the_permanent_refusal(self):
         # `Pieeja liegta / Access Denied` is final; this one passes. A caller that treated
-        # them alike would either hammer a page that will never open, or give up on 38
-        # procurements that were there all along.
+        # them alike would either hammer a page that will never open, or give up on
+        # procurements that are there.
         self.assertFalse(eis_page.is_access_denied(self.PAGE))
         denied = "<html><body>Pieeja liegta / Access Denied</body></html>"
         self.assertFalse(eis_page.is_robot_check(denied))

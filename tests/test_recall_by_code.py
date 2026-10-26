@@ -2,24 +2,16 @@
 # -*- coding: utf-8 -*-
 """A code can recall, and a title alone is why it has to be able to.
 
-Recall used to be title-only. A code could exclude a notice, or rescue one from an exclusion,
-but it could never bring anything in — so the gate's whole sensitivity rested on a buyer
-choosing words somebody had guessed in advance. That holds up after a title list has been
-tuned against a live register for months, and fails on a register whose roots were written in
-one sitting.
+A buyer may write a short, vague title and classify the purchase exactly. The title list
+misses it, while the code says precisely what the purchase is; `recall_cpv_prefixes` lets
+the gate hear the code.
 
-The failure is structural and needs no example to describe: a buyer writes a short, vague
-title and classifies the purchase exactly. The title list misses it, the code says precisely
-what the purchase is, and the gate has no way to hear the code. `recall_cpv_prefixes` gives
-it one.
+The property that matters here is not that the clause recalls, but that it can only widen:
+every exclusion still returns before it is reached.
 
-The property that matters here is not that the new clause recalls, but that it can only
-widen: every exclusion still returns before it is reached.
-
-THE FIXTURES BELOW ARE INVENTED, AND THAT IS A RULE RATHER THAN AN ACCIDENT. Nothing in this
-repository names what any deployment actually looks for. The terms arrive in a secret, the
-committed example policy is about something nobody hunts, and a test that reached for a real
-notice to make its point would undo both in a file nobody thinks of as disclosure.
+The fixtures below are invented, as a rule. Nothing in this repository names what any
+deployment actually looks for: the terms arrive from the caller, and the committed example
+policy is about something nobody hunts.
 """
 
 import os
@@ -61,7 +53,7 @@ class ACodeCanRecall(unittest.TestCase):
             notice("Delta diegimas objektu kontrolei", IN_CODE), rules))
 
     def test_without_the_code_list_that_notice_is_still_dropped(self):
-        """The old behaviour, unchanged — which is what makes the clause safe to add."""
+        """Without `recall_cpv_prefixes` the title alone decides."""
         self.assertTrue(gate.outside_scope(notice("Gamma", IN_CODE), policy()))
 
     def test_a_matching_title_still_wins_on_its_own(self):
@@ -91,14 +83,14 @@ class TheShapeStaysBackwardCompatible(unittest.TestCase):
 
     def test_a_policy_without_the_field_parses_and_recalls_nothing_extra(self):
         rules = policy()
-        # The tuple grows as optional fields are added; what this protects is that a policy
-        # written before any of them loads, and that every one it omits defaults to empty.
+        # A policy without the optional fields loads, and every one it omits defaults to
+        # empty.
         self.assertEqual(len(rules), 5)
         self.assertEqual(rules[3], ())      # override_prefixes
         self.assertEqual(rules[4], ())      # recall_cpv_prefixes
 
     def test_a_three_field_policy_tuple_is_still_accepted(self):
-        """`outside_scope` reads the tail defensively, as it already did for overrides."""
+        """`outside_scope` reads the optional tail defensively."""
         legacy = (("alfa sistem",), (), ())
         self.assertFalse(gate.outside_scope(notice("Alfa sistemos darbai", "45331000"),
                                             legacy))
@@ -107,9 +99,7 @@ class TheShapeStaysBackwardCompatible(unittest.TestCase):
     def test_every_committed_example_still_parses(self):
         """Whichever example policy this repository ships, the gate must still load it.
 
-        Found rather than named: each country tool carries its own illustration, and a test
-        that hard-codes one file name passes in the repository it was written in and fails
-        in the fork the moment the split happens.
+        Found rather than named, because each country tool carries its own illustration.
         """
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         examples = sorted(f for f in os.listdir(root)
