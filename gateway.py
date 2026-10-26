@@ -204,8 +204,12 @@ class Gateway:
                        if part.get("type") == "text")
         if result.get("isError"):
             raise GatewayError("%s: %s" % (name, text[:300]))
-        if result.get("structuredContent") is not None:
-            return result["structuredContent"]
+        structured = result.get("structuredContent")
+        if structured is not None:
+            # The gateway sends every answer as {"result": <answer>}; the text part is the bare answer.
+            if isinstance(structured, dict) and set(structured) == {"result"}:
+                return structured["result"]
+            return structured
         try:
             return json.loads(text)
         except ValueError:
