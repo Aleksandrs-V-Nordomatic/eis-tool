@@ -12,7 +12,8 @@ What it does:
   2. writes the settings to %USERPROFILE%\.eis-tool\downloader.json;
   3. asks for the monday.com token and the GitHub token and keeps them in the Windows
      Credential Manager (skip with -NoCredentials);
-  4. registers the task "Tender Radar LV download" (daily at 10:00 and at sign-in) and puts
+  4. registers the task "Tender Radar LV download" (daily at 10:00, at sign-in, on wake and on
+     joining a network, with no console window) and puts
      the shortcut "Tender Radar LV" on the desktop.
 
 Needs Python 3.12 or newer and Git on PATH; 7-Zip for 7z and RAR archives.
@@ -101,8 +102,10 @@ if (-not $NoCredentials) {
 }
 
 $run = Join-Path $app "setup\run.ps1"
-$action = New-ScheduledTaskAction -Execute "powershell.exe" `
-    -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$run`""
+# A headless console host: -WindowStyle Hidden still opens a window for a moment, or for good
+# when Windows Terminal hosts consoles, and closing that window stops the run.
+$action = New-ScheduledTaskAction -Execute "conhost.exe" `
+    -Argument "--headless powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$run`""
 # A run stopped by sleep or a lost network is resumed when the laptop wakes (S3 resume or the
 # end of Modern Standby) or joins a network. Most of these runs find nothing open and end at once.
 function New-EventTrigger([string]$Log, [string]$Select) {
@@ -125,8 +128,8 @@ Register-ScheduledTask -TaskName "Tender Radar LV download" -Action $action -Tri
 
 $shell = New-Object -ComObject WScript.Shell
 $link = $shell.CreateShortcut((Join-Path ([Environment]::GetFolderPath("Desktop")) "Tender Radar LV.lnk"))
-$link.TargetPath = "powershell.exe"
-$link.Arguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$run`" -Now"
+$link.TargetPath = "conhost.exe"
+$link.Arguments = "--headless powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$run`" -Now"
 $link.Description = "Download today's batch of Latvian tenders now"
 $link.Save()
 
