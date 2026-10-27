@@ -498,8 +498,12 @@ def xlsx_to_md(path):
     # a silently empty cell in the middle of a bill of quantities. Depending on every
     # producer having cached one is luck rather than a guarantee, so a second pass with
     # formulas visible supplies the formula text as the deterministic fallback.
-    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
-    wb_f = openpyxl.load_workbook(path, read_only=True, data_only=False)
+    # openpyxl refuses a path whose extension it does not know, and EIS names files
+    # "<title> (<file>.xlsx)"; given the bytes it reads the workbook whatever the name.
+    with open(path, "rb") as fh:
+        data = fh.read()
+    wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+    wb_f = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=False)
     parts = []
     for ws, ws_f in zip(wb.worksheets, wb_f.worksheets):
         rows = []
