@@ -94,7 +94,8 @@ board; GitHub, fine-grained with Actions read and write on this repository) and 
 the Windows Credential Manager, finds the library's synced folder (or takes `-LibraryFolder`),
 registers the task **Tender Radar LV download** (daily at 10:00, at sign-in, two minutes after
 the laptop wakes and two minutes after it joins a network) and puts the
-shortcut **Tender Radar LV** on the desktop. Each run updates the clone from `master` first.
+shortcut **Tender Radar LV** on the desktop. Both start PowerShell under `conhost.exe --headless`,
+so no console window opens that a click could close and stop the run. Each run updates the clone from `master` first.
 
 Run one batch by hand: `python download_batch.py --now`, or `--since YYYY-MM-DD` for a first
 batch that should start at a given day.
