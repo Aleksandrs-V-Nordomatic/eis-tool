@@ -49,6 +49,16 @@ class Withdrawn(Fail):
     """EIS answers that the procurement has nothing a guest may see."""
 
 
+class Offline(Exception):
+    """The portal could not be reached at all: no network, a laptop waking up, a dropped line.
+    Not a Fail, so nothing that falls back on a refusal falls back on a lost network."""
+
+
+# curl exit codes for a portal that was never reached or a line that broke mid-answer:
+# host not resolved, no connection, timed out, TLS handshake, empty reply, send, receive.
+OFFLINE_CODES = {6, 7, 28, 35, 52, 55, 56}
+
+
 def canonical_url(raw):
     """(page URL, procurement id) for an EIS procurement URL or a bare id."""
     raw = (raw or "").strip()
@@ -84,8 +94,9 @@ class Curl:
         proc = subprocess.run(cmd, capture_output=True, timeout=timeout + 120,
                               creationflags=NO_WINDOW)
         if proc.returncode != 0:
-            raise Fail("curl failed (%d): %s" % (proc.returncode,
-                                                 proc.stderr.decode("utf-8", "replace")[:300]))
+            error = Offline if proc.returncode in OFFLINE_CODES else Fail
+            raise error("curl failed (%d): %s" % (proc.returncode,
+                                                  proc.stderr.decode("utf-8", "replace")[:300]))
         return proc.stdout
 
     @staticmethod

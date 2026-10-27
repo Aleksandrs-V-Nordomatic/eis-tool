@@ -83,23 +83,27 @@ def _zip_name(info):
 
 
 def extract(path, member, dest):
-    """Write one member of the archive to `dest`."""
+    """Write one member of the archive to `dest`. `dest` appears only once it is whole, so a
+    run stopped halfway leaves no member that looks finished."""
     if not eis_fetch.safe_member(member):
         raise Unreadable("unsafe member path %r" % member)
+    part = dest + ".part"
     if zipfile.is_zipfile(path):
         with zipfile.ZipFile(path) as z:
             info = next((i for i in z.infolist() if _zip_name(i) == member), None)
             if info is None:
                 raise Unreadable("no member %r" % member)
-            with z.open(info) as src, open(dest, "wb") as dst:
+            with z.open(info) as src, open(part, "wb") as dst:
                 shutil.copyfileobj(src, dst)
+        os.replace(part, dest)
         return
     binary = seven_zip()
     if not binary:
         raise Unreadable("7-Zip is not installed")
-    with open(dest, "wb") as dst:
+    with open(part, "wb") as dst:
         proc = subprocess.run([binary, "e", "-so", "-sccUTF-8", path, member],
                               stdout=dst, stderr=subprocess.PIPE, timeout=1800,
                               creationflags=NO_WINDOW)
     if proc.returncode != 0:
         raise Unreadable(proc.stderr.decode("utf-8", "replace")[:200] or "7-Zip failed")
+    os.replace(part, dest)

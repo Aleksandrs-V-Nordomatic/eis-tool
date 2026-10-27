@@ -72,7 +72,11 @@ language is compared only on the fields that do not depend on it.
 | Start `process-batch.yml` with the batch id | `Downloader.dispatch` |
 
 A tender that fails is tried again by the next run; after three failed runs in a row it is
-handed over as failed. Records of the archive section (replaced versions) are listed by title and not opened.
+handed over as failed. A portal out of reach (curl could not resolve, connect or finish) is
+not a failure: the run waits up to two hours for the network and goes on with the same tender,
+or leaves the batch to the next run with the tender's attempts untouched. Each tender's
+`selection.json` is saved after every file, and a downloaded file or unpacked member is renamed
+into place only once whole, so a stopped run starts again at the first unfinished file. Records of the archive section (replaced versions) are listed by title and not opened.
 Windows notifications report the start, the end and every failure; the batch log is in
 `<batches>/<batch id>/log.txt`.
 
@@ -88,7 +92,8 @@ It clones this repository to `%LOCALAPPDATA%\eis-tool\app`, makes a Python envir
 `%USERPROFILE%\.eis-tool\downloader.json`, asks for two tokens (monday.com, read access to the
 board; GitHub, fine-grained with Actions read and write on this repository) and keeps them in
 the Windows Credential Manager, finds the library's synced folder (or takes `-LibraryFolder`),
-registers the task **Tender Radar LV download** (daily at 10:00 and at sign-in) and puts the
+registers the task **Tender Radar LV download** (daily at 10:00, at sign-in, two minutes after
+the laptop wakes and two minutes after it joins a network) and puts the
 shortcut **Tender Radar LV** on the desktop. Each run updates the clone from `master` first.
 
 Run one batch by hand: `python download_batch.py --now`, or `--since YYYY-MM-DD` for a first

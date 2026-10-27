@@ -51,12 +51,18 @@ class FakeTender:
 
     pages = {}
     failures = {}
+    offline = {}
+    broken_files = {}
+    downloads = []
 
     def __init__(self, url, workdir, register_uuid=None):
         self.url, self.pid = eis_fetch.canonical_url(url)
         if FakeTender.failures.get(self.pid):
             FakeTender.failures[self.pid] -= 1
             raise eis_fetch.Fail("refused")
+        if FakeTender.offline.get(self.pid):
+            FakeTender.offline[self.pid] -= 1
+            raise eis_fetch.Offline("curl failed (6): Could not resolve host")
         self.facts = {"title": "Tender %s" % self.pid, "cpv_main": "45000000-7"}
 
     def records(self):
@@ -79,6 +85,10 @@ class FakeTender:
         return [{"file_id": 21, "name": "Projekts.zip", "type_code": None}]
 
     def download_file(self, record, file_id, dest):
+        if FakeTender.broken_files.get((self.pid, file_id)):
+            FakeTender.broken_files[(self.pid, file_id)] -= 1
+            raise eis_fetch.Fail("connection reset")
+        FakeTender.downloads.append((self.pid, file_id))
         if file_id == 21:
             inner = dest + ".inner"
             make_zip(inner, {"AR-02.dwg": b"cad", "Darba uzdevums.docx": b"task"})
@@ -127,8 +137,13 @@ class Run(unittest.TestCase):
         self.patch(harvest, "resolve", lambda uuid: "https://www.eis.gov.lv/EKEIS/Supplier/Procurement/%s"
                    % uuid.split("-")[1])
         self.patch(watchlist, "keys", lambda token, settings: (["EIS:300"], []))
+        self.patch(download_batch, "network_up", lambda: True)
+        self.patch(download_batch, "NETWORK_PAUSE", 0)
         self.windows = []
         FakeTender.failures = {}
+        FakeTender.offline = {}
+        FakeTender.broken_files = {}
+        FakeTender.downloads = []
 
     def patch(self, owner, name, value):
         original = getattr(owner, name)
@@ -235,6 +250,59 @@ class Run(unittest.TestCase):
         self.assertEqual(results, [("LV-20261026-0001", "handed over")])
         tenders = {t["pid"]: t for t in self.manifest("LV-20261026-0001")["tenders"]}
         self.assertEqual(tenders["300"]["status"], "failed")
+
+    def test_a_lost_network_is_waited_for_and_costs_the_tender_no_attempt(self):
+        FakeTender.offline = {"300": 1}
+        answers = iter([False, False, True])
+        self.patch(download_batch, "network_up", lambda: next(answers))
+        results = self.dl.run()
+        self.assertEqual(results, [("LV-20261026-0001", "handed over")])
+        state = download_batch.load_json(os.path.join(self.root, "LV-20261026-0001", "state.json"))
+        tender = next(t for t in state["tenders"] if t["pid"] == "300")
+        self.assertEqual((tender["status"], tender["attempts"]), ("downloaded", 0))
+
+    def test_a_network_that_stays_down_never_fails_a_tender(self):
+        FakeTender.offline = {"300": 99}
+        self.patch(download_batch, "network_up", lambda: False)
+        self.patch(download_batch, "NETWORK_WAIT", 0)
+        for _ in range(download_batch.MAX_ATTEMPTS + 1):
+            results = self.dl.run()
+        self.assertEqual(results, [("LV-20261026-0001", "interrupted")])
+        state = download_batch.load_json(os.path.join(self.root, "LV-20261026-0001", "state.json"))
+        tender = next(t for t in state["tenders"] if t["pid"] == "300")
+        self.assertEqual((tender["status"], tender["attempts"]), ("pending", 0))
+        self.assertEqual(self.library.uploads, [])
+
+    def test_a_run_stopped_inside_a_tender_keeps_the_files_it_finished(self):
+        FakeTender.broken_files = {("100", 21): 1}
+        self.dl.run()
+        FakeTender.downloads = []
+        self.dl.run()
+        self.assertEqual(FakeTender.downloads, [("100", 21)])
+
+    def test_a_downloaded_archive_and_its_unpacked_members_are_taken_from_disk(self):
+        extracted, real = [], download_batch.archives.extract
+
+        def stopped_after_one(path, member, dest):
+            if extracted:
+                raise KeyboardInterrupt("the laptop went to sleep")
+            extracted.append(member)
+            real(path, member, dest)
+
+        self.patch(download_batch.archives, "extract", stopped_after_one)
+        with self.assertRaises(KeyboardInterrupt):
+            self.dl.run()
+        FakeTender.downloads, calls = [], []
+        self.patch(download_batch.archives, "extract",
+                   lambda path, member, dest: (calls.append((path, member)), real(path, member, dest)))
+        self.dl.run()
+        self.assertNotIn(("100", 21), FakeTender.downloads)
+        first_tender = [m for path, m in calls if os.sep + "100" + os.sep in path]
+        self.assertNotIn(extracted[0], first_tender)
+        kept = [t for t in self.manifest("LV-20261026-0001")["tenders"] if t["pid"] == "100"][0]
+        names = sorted(f["name"] for f in kept["files"] if f.get("stored"))
+        self.assertIn("Tehniska specifikacija.pdf", names)
+        self.assertIn("Darba uzdevums.docx", names)
 
     def test_processing_starts_only_when_onedrive_has_carried_every_file(self):
         self.library.unsynced = {"p/work/LV/inbox/LV-20261026-0001/manifest.json"}
