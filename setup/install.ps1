@@ -103,7 +103,21 @@ if (-not $NoCredentials) {
 $run = Join-Path $app "setup\run.ps1"
 $action = New-ScheduledTaskAction -Execute "powershell.exe" `
     -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$run`""
-$triggers = @((New-ScheduledTaskTrigger -Daily -At $At), (New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME))
+# A run stopped by sleep or a lost network is resumed when the laptop wakes (S3 resume or the
+# end of Modern Standby) or joins a network. Most of these runs find nothing open and end at once.
+function New-EventTrigger([string]$Log, [string]$Select) {
+    $class = Get-CimClass -Namespace Root/Microsoft/Windows/TaskScheduler -ClassName MSFT_TaskEventTrigger
+    $trigger = New-CimInstance -CimClass $class -ClientOnly
+    $trigger.Subscription = "<QueryList><Query Id=`"0`" Path=`"$Log`"><Select Path=`"$Log`">$Select</Select></Query></QueryList>"
+    $trigger.Delay = "PT2M"
+    $trigger.Enabled = $true
+    $trigger
+}
+$woke = New-EventTrigger "System" ("*[System[(Provider[@Name='Microsoft-Windows-Power-Troubleshooter'] and EventID=1)" +
+    " or (Provider[@Name='Microsoft-Windows-Kernel-Power'] and EventID=507)]]")
+$online = New-EventTrigger "Microsoft-Windows-NetworkProfile/Operational" "*[System[EventID=10000]]"
+$triggers = @((New-ScheduledTaskTrigger -Daily -At $At), (New-ScheduledTaskTrigger -AtLogOn -User $env:USERNAME),
+    $woke, $online)
 $task_settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -DontStopIfGoingOnBatteries `
     -AllowStartIfOnBatteries -ExecutionTimeLimit (New-TimeSpan -Hours 8) -MultipleInstances IgnoreNew
 Register-ScheduledTask -TaskName "Tender Radar LV download" -Action $action -Trigger $triggers `
@@ -116,4 +130,4 @@ $link.Arguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File 
 $link.Description = "Download today's batch of Latvian tenders now"
 $link.Save()
 
-Write-Host "Installed. Task 'Tender Radar LV download' runs daily at $At and at sign-in."
+Write-Host "Installed. Task 'Tender Radar LV download' runs daily at $At, at sign-in, on wake and on joining a network."

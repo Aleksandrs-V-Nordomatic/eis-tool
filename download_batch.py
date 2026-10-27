@@ -19,6 +19,7 @@ import datetime as dt
 import json
 import os
 import re
+import socket
 import subprocess
 import sys
 import time
@@ -45,6 +46,10 @@ SYNC_WAIT = 2 * 3600
 SYNC_PAUSE = 20
 MAX_NESTING = 3
 OPEN = ("downloading", "uploaded", "failed")
+# How long a run waits for a lost network to come back before it leaves the batch to the next
+# run (the task starts one when the laptop wakes or reconnects), and how often it looks.
+NETWORK_WAIT = 2 * 3600
+NETWORK_PAUSE = 30
 
 
 def riga():
@@ -97,6 +102,15 @@ def save_json(path, data, tries=20):
             if attempt == tries - 1:
                 raise
             time.sleep(0.25)
+
+
+def network_up():
+    """True when the portal's address resolves and its HTTPS port answers."""
+    try:
+        socket.create_connection(("www.eis.gov.lv", 443), timeout=10).close()
+        return True
+    except OSError:
+        return False
 
 
 def safe_name(name, limit=120):
@@ -370,13 +384,17 @@ class Downloader:
                 "sha256": None}
 
     def download(self, batch_id, selected):
-        """Download every kept file not yet complete; sort the members of archives."""
+        """Download every kept file not yet complete; sort the members of archives.
+
+        The selection is saved after every file, so a run stopped by sleep or a lost network
+        starts again at the first unfinished file. A file is renamed into place only once it is
+        whole, so one found on disk is taken as it is."""
         pid = selected["pid"]
         home = os.path.join(self.folder(batch_id), "tenders", pid)
         page = None
         records = {str(r["id"]): r for r in selected["records"]}
-        last_bytes, out = 0, []
-        for f in selected["files"]:
+        last_bytes, out, files = 0, [], selected["files"]
+        for n, f in enumerate(files):
             if f["decision"] != selection.DOWNLOAD or f["archive"]:
                 out.append(f)
                 continue
@@ -385,29 +403,44 @@ class Downloader:
             if f.get("sha256") and os.path.exists(target) and os.path.getsize(target) == f["size"]:
                 out.append(f)
                 continue
-            if page is None:
-                page = eis_fetch.Tender(pid, os.path.join(home, "work"))
-            if last_bytes:
-                time.sleep(eis_fetch.pause_for(last_bytes))
-            part = target + ".part"
             record = records[str(f["record_id"])]
-            if f["file_id"] is None:
-                page.download_record_zip(record, part)
-                announced = None
-            else:
-                announced = page.download_file(record, f["file_id"], part)
-            size = os.path.getsize(part)
-            if announced is not None and announced != size:
-                raise eis_fetch.Fail("file %s: %d of %d bytes" % (f["name"], size, announced))
-            os.replace(part, target)
-            last_bytes = size
-            f = dict(f, stored=stored, size=size, sha256=eis_fetch.sha256_file(target))
+            if not os.path.exists(target):
+                if page is None:
+                    page = eis_fetch.Tender(pid, os.path.join(home, "work"))
+                if last_bytes:
+                    time.sleep(eis_fetch.pause_for(last_bytes))
+                part = target + ".part"
+                if f["file_id"] is None:
+                    page.download_record_zip(record, part)
+                    announced = None
+                else:
+                    announced = page.download_file(record, f["file_id"], part)
+                size = os.path.getsize(part)
+                if announced is not None and announced != size:
+                    raise eis_fetch.Fail("file %s: %d of %d bytes" % (f["name"], size, announced))
+                os.replace(part, target)
+                last_bytes = size
+            f = dict(f, stored=stored, size=os.path.getsize(target),
+                     sha256=eis_fetch.sha256_file(target))
             out.append(f)
             if f["file_id"] is None or self.is_archive(f["name"], target):
                 out += self.sort_archive(home, f, record)
+            selected["files"] = out + files[n + 1:]
+            save_json(os.path.join(home, "selection.json"), selected)
         selected["files"] = out
         save_json(os.path.join(home, "selection.json"), selected)
         return selected
+
+    def wait_for_network(self):
+        """True once the portal answers again; False if it stays out of reach for NETWORK_WAIT."""
+        self.log("  waiting for the network")
+        deadline = time.time() + NETWORK_WAIT
+        while not network_up():
+            if time.time() >= deadline:
+                return False
+            time.sleep(NETWORK_PAUSE)
+        self.log("  the network is back")
+        return True
 
     def is_archive(self, name, path):
         """An archive by its extension, or a file without one that starts like an archive."""
@@ -446,7 +479,8 @@ class Downloader:
             if decision != selection.DOWNLOAD:
                 continue
             target = os.path.join(home, "files", m["slot"])
-            archives.extract(path, member, target)
+            if not os.path.exists(target):
+                archives.extract(path, member, target)
             m.update(stored=m["slot"], size=os.path.getsize(target),
                      sha256=eis_fetch.sha256_file(target))
             if depth < MAX_NESTING and self.is_archive(name, target):
@@ -470,6 +504,9 @@ class Downloader:
         except eis_fetch.Withdrawn as exc:
             self.log("  %s withdrawn: %s" % (tender["pid"], exc))
             return "withdrawn", str(exc)[:300]
+        except eis_fetch.Offline as exc:
+            self.log("  %s: the portal is out of reach: %s" % (tender["pid"], str(exc)[:200]))
+            return "offline", str(exc)[:300]
         except Exception as exc:
             self.log("  %s not finished: %s" % (tender["pid"], str(exc)[:300]))
             return "pending", str(exc)[:300]
@@ -486,6 +523,12 @@ class Downloader:
                     continue
                 self.log("[%s] %s" % (tender["pid"], "watched" if tender.get("watched") else "new"))
                 status, error = self.fetch_tender(batch_id, tender)
+                while status == "offline" and self.wait_for_network():
+                    status, error = self.fetch_tender(batch_id, tender)
+                if status == "offline":
+                    # A lost network is no fault of the tender: it keeps its attempts.
+                    self.log("the network did not come back; the batch waits for the next run")
+                    break
                 tender["attempts"] = tender.get("attempts", 0) + (status == "pending")
                 tender["error"] = error
                 if status == "pending" and tender["attempts"] >= MAX_ATTEMPTS:
