@@ -12,7 +12,8 @@ What it does:
   2. writes the settings to %USERPROFILE%\.eis-tool\downloader.json;
   3. asks for the monday.com token and the GitHub token and keeps them in the Windows
      Credential Manager (skip with -NoCredentials);
-  4. registers the task "Tender Radar LV download" (daily at 10:00 and at sign-in) and puts
+  4. registers the task "Tender Radar LV download" (daily at 10:00, at sign-in, on wake and on
+     joining a network, with no console window) and puts
      the shortcut "Tender Radar LV" on the desktop.
 
 Needs Python 3.12 or newer and Git on PATH; 7-Zip for 7z and RAR archives.
