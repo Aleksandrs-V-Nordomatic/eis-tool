@@ -70,6 +70,7 @@ language is compared only on the fields that do not depend on it.
 | Copy the kept files, then `manifest.json`, into the synced library folder | `Downloader.upload` |
 | Wait until OneDrive shows every one of them as an in-sync placeholder, up to two hours; otherwise the next run waits again | `Downloader.wait_for_sync`, `synced.Library.not_in_sync` |
 | Start `process-batch.yml` with the batch id | `Downloader.dispatch` |
+| Once the library holds the batch's `complete.json`, delete everything of the batch but `state.json` and `log.txt`, so a batch leaves the disk as it found it | `Downloader.free_space` |
 
 A tender that fails is tried again by the next run; after three failed runs in a row it is
 handed over as failed. A portal out of reach (curl could not resolve, connect or finish) is
