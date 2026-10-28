@@ -1,20 +1,23 @@
 name: process-batch
 
-# Started by the Tender batch downloader once a batch is in the staging folder of the library.
+# Started by the Tender download coordinator once a computer has handed a tender over to the
+# staging folder of the library. One run is one handed-over tender.
 
 on:
   workflow_dispatch:
     inputs:
-      batch_id:
-        description: "The batch to process, for example LV-20261026-0001"
+      handover_id:
+        description: "The hand-over to process, <pid>-<lease>, for example 900001-2"
         required: true
 
 permissions:
   contents: read
 
+# Runs wait in one first-in, first-out queue of up to 100 and start one after another. Without
+# `queue: max` a newer run would cancel the one already waiting.
 concurrency:
   group: process-batch
-  cancel-in-progress: false
+  queue: max
 
 jobs:
   process:
@@ -27,14 +30,16 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Process ${{ inputs.batch_id }}
+      - name: Process ${{ inputs.handover_id }}
         env:
-          BATCH_ID: ${{ inputs.batch_id }}
+          HANDOVER_ID: ${{ inputs.handover_id }}
+          EIS_COUNTRY: LV
           GRAPH_TENANT_ID: ${{ secrets.GRAPH_TENANT_ID }}
           GRAPH_CLIENT_ID: ${{ secrets.GRAPH_CLIENT_ID }}
           GRAPH_CLIENT_SECRET: ${{ secrets.GRAPH_CLIENT_SECRET }}
           GRAPH_DRIVE_ID: ${{ secrets.GRAPH_DRIVE_ID }}
           GRAPH_DEST_ROOT: ${{ secrets.GRAPH_DEST_ROOT }}
-          ROUTINE_FIRE_URL: ${{ secrets.ROUTINE_FIRE_URL }}
-          ROUTINE_FIRE_TOKEN: ${{ secrets.ROUTINE_FIRE_TOKEN }}
-        run: python3 process_batch.py --batch-id "$BATCH_ID"
+          COORDINATOR_URL: ${{ secrets.COORDINATOR_URL }}
+          COORDINATOR_CLIENT_ID: ${{ secrets.COORDINATOR_CLIENT_ID }}
+          COORDINATOR_CLIENT_SECRET: ${{ secrets.COORDINATOR_CLIENT_SECRET }}
+        run: python3 process_batch.py --handover-id "$HANDOVER_ID"

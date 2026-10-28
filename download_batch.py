@@ -1,20 +1,24 @@
-"""Tender batch downloader: one daily batch of Latvian tenders, on the laptop.
+"""Tender batch downloader: the day's Latvian tenders, one at a time, on a participating computer.
 
-    python download_batch.py               the daily run
+    python download_batch.py               a run, from the scheduled task or the desktop shortcut
     python download_batch.py --since 2026-10-20
 
-It lists the notices published since the last handed-over batch listed the register, keeps those the recall
-policy lets through and the tenders on the watch list, selects and downloads their documents,
-copies the batch into the staging folder of the library as OneDrive syncs it to this computer,
-waits until OneDrive has carried every file to SharePoint and starts the processing workflow.
-It converts, judges and publishes nothing. An interrupted batch is resumed by the next run.
+A run joins the day at the Tender download coordinator. The first computer to ask lists the
+day: the notices published since the newest day's work list's window that pass the recall
+gate, plus the tenders on the watch list. It writes the day's work list into the library and
+gives the tenders to the coordinator. Every computer then takes tenders one at a time:
+selects and downloads one tender's documents into its own folder, confirms its lease while it
+works, copies the kept files and then the manifest into the staging folder of the library as
+the sync client keeps it on this computer, waits until every file is carried to SharePoint and
+hands the tender over. The coordinator starts the processing workflow. It converts, judges and
+publishes nothing.
 
 Settings: %USERPROFILE%\\.eis-tool\\downloader.json (written by setup/install.ps1).
-Credentials: Windows Credential Manager (monday.com token, GitHub token).
+Credentials: Windows Credential Manager (the person's monday.com token; this computer's
+Cloudflare Access service token for the Coordinator API).
 """
 
 import argparse
-import calendar
 import datetime as dt
 import json
 import os
@@ -23,12 +27,12 @@ import shutil
 import socket
 import subprocess
 import sys
+import threading
 import time
 import traceback
-import urllib.error
-import urllib.request
 
 import archives
+import coordinator
 import eis_fetch
 import harvest
 import policy
@@ -38,22 +42,26 @@ import watchlist
 
 SETTINGS = os.path.join(os.path.expanduser("~"), ".eis-tool", "downloader.json")
 LOG_CAP = 5 * 1024 * 1024
-MAX_ATTEMPTS = 3
 # SharePoint rewrites the Office files it receives, so their size and hash change; under this
 # suffix the inbox keeps the bytes that were downloaded. The manifest names each file's inbox name.
 INBOX_SUFFIX = ".bin"
-# How long a run waits for OneDrive to carry a copied batch to SharePoint, and how often it looks.
+# How long a run waits for the sync client to carry a hand-over to SharePoint, and how often it looks.
 SYNC_WAIT = 2 * 3600
 SYNC_PAUSE = 20
 MAX_NESTING = 3
-OPEN = ("downloading", "uploaded", "failed")
-# What a batch keeps once the library has confirmed its processing: enough to know its window
-# and what happened to it.
-KEPT_AFTER_COMPLETE = ("state.json", "log.txt")
-# How long a run waits for a lost network to come back before it leaves the batch to the next
-# run (the task starts one when the laptop wakes or reconnects), and how often it looks.
+# How long a run waits for a lost network to come back before it gives the tender back, and
+# how often it looks. Neither the wait nor the give-back spends one of the tender's attempts.
 NETWORK_WAIT = 2 * 3600
 NETWORK_PAUSE = 30
+# The lease is confirmed this often while the computer works on a tender or lists the day; the
+# coordinator lets a lease lapse after 20 minutes without a confirmation.
+CONFIRM_EVERY = 180
+# How long a computer given a tender waits for the sync client to bring it the day's work list,
+# and how long it waits for another computer to open the day.
+DAY_WAIT = 2 * 3600
+DAY_PAUSE = 60
+# What a tender's folder keeps once the library holds its publication record.
+KEPT_AFTER_PUBLISHED = ("state.json",)
 
 
 def riga():
@@ -97,7 +105,7 @@ def save_json(path, data, tries=20):
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(data, fh, ensure_ascii=False, indent=2)
     # A virus scanner or the search indexer can hold a file just written for a moment, and
-    # Windows then refuses the replace (WinError 5); the state is saved after every copied file.
+    # Windows then refuses the replace (WinError 5); the selection is saved after every file.
     for attempt in range(tries):
         try:
             os.replace(tmp, path)
@@ -124,14 +132,13 @@ def safe_name(name, limit=120):
 
 
 class Log:
-    """The batch log, capped; the record when a notification is not shown."""
+    """The day's log, capped; the record when a notification is not shown."""
 
     def __init__(self, path):
         self.path = path
 
     def __call__(self, line):
-        stamp = time.strftime("%Y-%m-%d %H:%M:%S")
-        text = "%s %s" % (stamp, line)
+        text = "%s %s" % (time.strftime("%Y-%m-%d %H:%M:%S"), line)
         try:
             print(text, flush=True)
         except UnicodeEncodeError:
@@ -139,6 +146,7 @@ class Log:
         try:
             if os.path.exists(self.path) and os.path.getsize(self.path) > LOG_CAP:
                 return
+            os.makedirs(os.path.dirname(self.path), exist_ok=True)
             with open(self.path, "a", encoding="utf-8") as fh:
                 fh.write(text + "\n")
         except OSError:
@@ -177,12 +185,12 @@ def secret(name, env_name):
     import keyring
     value = keyring.get_password("eis-tool", name)
     if not value:
-        raise RuntimeError("no %s token: run setup/install.ps1 -Credentials" % name)
+        raise RuntimeError("no %s credential: run setup/install.ps1" % name)
     return value
 
 
 class Lock:
-    """One batch at a time on this machine."""
+    """One run at a time on this machine."""
 
     def __init__(self, path):
         self.path = path
@@ -227,18 +235,70 @@ def _alive(pid):
         return False
 
 
+class Heartbeat:
+    """Confirms a lease on a background thread every CONFIRM_EVERY seconds until stopped.
+
+    A 409 from the coordinator means the lease lapsed (the computer slept, or the network was
+    gone for 20 minutes) or went to another computer: `lost` is set and the work stops at the
+    next file. A coordinator out of reach is tried again at the next beat.
+    """
+
+    def __init__(self, confirm, log=print, every=None):
+        self.confirm = confirm
+        self.log = log
+        self.every = CONFIRM_EVERY if every is None else every
+        self.lost = threading.Event()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._stop.set()
+        self._thread.join(timeout=5)
+
+    def beat(self):
+        """Confirm once, now. False when the lease is gone."""
+        if self.lost.is_set():
+            return False
+        try:
+            self.confirm()
+        except coordinator.LeaseLost:
+            self.lost.set()
+            return False
+        except coordinator.Error as exc:
+            self.log("  lease not confirmed this time: %s" % exc)
+        return True
+
+    def _run(self):
+        while not self._stop.wait(self.every):
+            if not self.beat():
+                return
+
+
+class LeaseGone(Exception):
+    """The coordinator no longer counts this computer as the tender's holder."""
+
+
+class FilesFailed(Exception):
+    """One or more selected files could not be downloaded in this attempt."""
+
+
 # --------------------------------------------------------------------------- the run
 class Downloader:
-    def __init__(self, settings, library=None, monday_token=None, github_token=None):
+    def __init__(self, settings, library, client, monday_token=None, computer=None):
         self.settings = settings
         self.country = settings["country"]
-        self.root = settings["batches"]
+        self.root = settings["tenders"]
         self.project = settings["library_project"].rstrip("/")
         self.work = "%s/work/%s" % (self.project, self.country)
         self.kit = "%s/%s" % (self.project, settings["kit"].strip("/"))
         self.library = library
+        self.coordinator = client
         self.monday_token = monday_token
-        self.github_token = github_token
+        self.computer = computer
         self.log = print
 
     # ---------------------------------------------------------------- rules
@@ -256,56 +316,44 @@ class Downloader:
             raise RuntimeError("watch_list.json is missing from the kit")
         self.watch = json.loads(text)
 
-    # ---------------------------------------------------------------- state
-    def batches(self):
-        """Local batches, oldest first: (id, state)."""
-        if not os.path.isdir(self.root):
-            return []
-        out = []
-        for name in sorted(os.listdir(self.root)):
-            state = load_json(os.path.join(self.root, name, "state.json"))
-            if state and state.get("country") == self.country:
-                out.append((name, state))
-        return out
+    # ---------------------------------------------------------------- the day's work list
+    def day_path(self, date):
+        return "%s/days/%s.json" % (self.work, date)
+
+    def read_day(self, date):
+        try:
+            day = json.loads(self.library.read_text(self.day_path(date)) or "null")
+        except ValueError:
+            return None
+        return day if isinstance(day, dict) and day.get("date") == date else None
 
     def last_window_end(self):
-        """The moment the newest handed-over batch listed the register, here or in the library."""
-        ends = [moment(s["window"]["to"]) for _, s in self.batches()
-                if s.get("status") in ("processing_requested", "complete")]
-        names = [n for n in self.library.list_names(self.work + "/batches")
-                 if n.startswith(self.country + "-")]
-        for name in sorted(names, reverse=True)[:3]:
-            record = self.library.read_text("%s/batches/%s/complete.json" % (self.work, name))
+        """Where the newest day's work list's window ends (Notice window, rule 2).
+
+        Before the first day's work list exists, the newest completion record of a daily
+        batch says where the last listing ended."""
+        names = sorted((n for n in self.library.list_names(self.work + "/days")
+                        if re.match(r"^\d{4}-\d{2}-\d{2}\.json$", n)), reverse=True)
+        for name in names[:7]:
+            day = self.read_day(name[:-5])
             try:
-                ends.append(moment(json.loads(record)["window"]["to"]))
-                break
-            except (ValueError, KeyError, TypeError):
+                return moment(day["window"]["to"])
+            except (TypeError, KeyError, ValueError):
                 continue
-        return max(ends) if ends else None
+        for name in sorted(self.library.list_names(self.work + "/batches"), reverse=True)[:3]:
+            if not name.startswith(self.country + "-"):
+                continue
+            try:
+                record = json.loads(self.library.read_text(
+                    "%s/batches/%s/complete.json" % (self.work, name)) or "null")
+                return moment(record["window"]["to"])
+            except (TypeError, KeyError, ValueError):
+                continue
+        return None
 
-    def started_today(self):
-        today = riga_today()
-        return any(moment(s["created"]).astimezone(riga()).date() == today
-                   for _, s in self.batches())
-
-    def next_id(self, today):
-        prefix = "%s-%s-" % (self.country, today.strftime("%Y%m%d"))
-        taken = {n for n, _ in self.batches()} | set(self.library.list_names(self.work + "/batches"))
-        n = 1
-        while "%s%04d" % (prefix, n) in taken:
-            n += 1
-        return "%s%04d" % (prefix, n)
-
-    def folder(self, batch_id):
-        return os.path.join(self.root, batch_id)
-
-    def save(self, batch_id, state):
-        save_json(os.path.join(self.folder(batch_id), "state.json"), state)
-
-    # ---------------------------------------------------------------- listing
     def list_new(self, window_from, window_to):
-        """The tenders of a new batch: notices published after `window_from` and up to
-        `window_to` that pass the recall gate, plus the watch list."""
+        """The day's tenders: notices published after `window_from` and up to `window_to` that
+        pass the recall gate, plus the watch list. Ordered by EIS number."""
         raw, coverage = harvest.fetch_window(window_from.astimezone(riga()).date(),
                                              window_to.astimezone(riga()).date())
         if not coverage["proven"]:
@@ -337,16 +385,129 @@ class Downloader:
                 self.log("watched card key not usable: %s" % key)
                 continue
             tenders.setdefault(pid, {"pid": pid, "notice": None})["watched"] = True
-        self.log("batch: %d tenders, %d of them watched"
+        self.log("day: %d tenders, %d of them watched"
                  % (len(tenders), sum(1 for t in tenders.values() if t["watched"])))
-        return [dict(t, status="pending", attempts=0) for _, t in sorted(tenders.items())]
+        return [tenders[pid] for pid in sorted(tenders, key=lambda p: (len(p), p))]
 
-    # ---------------------------------------------------------------- one tender
-    def select(self, batch_id, tender):
+    def list_day(self, date, lease, since=None):
+        """List the day under the listing lease, write the day's work list, then open it.
+
+        A day's work list already in the library for this date is opened as it is: the day is
+        never listed twice (Notice window, rule 1). A list with no tenders is still opened."""
+        day = self.read_day(date)
+        if day:
+            self.log("the day's work list of %s is in the library; it is opened as it is" % date)
+        else:
+            with Heartbeat(lambda: self.coordinator.confirm_listing(date, lease),
+                           log=self.log) as beat:
+                end = now_utc()
+                start = moment(since) if since else (self.last_window_end()
+                                                     or end - dt.timedelta(days=1))
+                start = min(start, end)
+                self.log("listing the day %s: window %s to %s" % (date, stamp(start), stamp(end)))
+                tenders = self.list_new(start, end)
+                if not beat.beat():
+                    raise coordinator.LeaseLost("the listing lease lapsed while listing")
+            day = {"schema": "lv-day/1", "date": date,
+                   "window": {"from": stamp(start), "to": stamp(end)},
+                   "opened_at": stamp(now_utc()), "computer": self.computer,
+                   "tenders": [dict(t, position=n) for n, t in enumerate(tenders, 1)]}
+            local = os.path.join(self.root, "days", "%s.json" % date)
+            os.makedirs(os.path.dirname(local), exist_ok=True)
+            save_json(local, day)
+            self.library.upload(self.day_path(date), local, replace=True)
+        answer = self.coordinator.open_day(date, lease, day["window"], day["tenders"])
+        self.log("the day's work list is open: %s tenders" % answer.get("positions"))
+        return day
+
+    def join(self, since=None):
+        """Join the day; list it when the coordinator says so. Returns the day's date."""
+        deadline = time.monotonic() + DAY_WAIT
+        while True:
+            answer = self.coordinator.join()
+            kind = answer.get("answer")
+            if kind == "work":
+                return answer["date"]
+            if kind == "list":
+                try:
+                    self.list_day(answer["date"], answer["listing_lease"], since)
+                    return answer["date"]
+                except coordinator.LeaseLost as exc:
+                    self.log("listing lease lost (%s); joining again" % exc)
+                    continue
+            elif kind != "wait":
+                raise coordinator.Error("join answered %r" % kind)
+            if time.monotonic() >= deadline:
+                raise RuntimeError("the day's work list was not opened within two hours")
+            self.log("another computer is listing the day; asking again")
+            time.sleep(answer.get("retry_after_seconds") or DAY_PAUSE)
+
+    def wait_for_day(self, date, beat):
+        """The day's work list once the sync client has brought it to this computer."""
+        deadline = time.monotonic() + DAY_WAIT
+        while True:
+            day = self.read_day(date)
+            if day:
+                return day
+            if beat.lost.is_set() or time.monotonic() >= deadline:
+                return None
+            self.log("  waiting for the sync client to bring the day's work list")
+            time.sleep(DAY_PAUSE)
+
+    # ---------------------------------------------------------------- one tender's folder
+    def home(self, pid):
+        return os.path.join(self.root, pid)
+
+    def take_up(self, pid, date, lease):
+        """Open the tender's folder. Work left by an earlier run of the same day is taken up;
+        a folder of another day is emptied first, because a watched tender is read daily."""
+        home = self.home(pid)
+        state = load_json(os.path.join(home, "state.json"))
+        if state and state.get("date") != date and os.path.isdir(home):
+            shutil.rmtree(archives.long_path(home))
+            state = None
+        os.makedirs(os.path.join(home, "files"), exist_ok=True)
+        state = dict(state or {}, pid=pid, date=date, lease=lease, status="downloading",
+                     taken_at=stamp(now_utc()))
+        self.save_state(pid, state)
+        return state
+
+    def save_state(self, pid, state):
+        save_json(os.path.join(self.home(pid), "state.json"), state)
+
+    def free_space(self):
+        """Empty the folder of every tender whose publication record is in the library; only
+        its state stays. Until the record is there the files stay, because the workflow may put
+        the tender back and this computer may be given it again."""
+        if not os.path.isdir(self.root):
+            return
+        published = set(self.library.list_names(self.work + "/published"))
+        for pid in sorted(os.listdir(self.root)):
+            state = load_json(os.path.join(self.root, pid, "state.json"))
+            if not state or state.get("status") != "handed over":
+                continue
+            if "%s.json" % state.get("handover_id") not in published:
+                continue
+            freed = 0
+            for name in os.listdir(self.home(pid)):
+                if name in KEPT_AFTER_PUBLISHED:
+                    continue
+                path = archives.long_path(os.path.join(self.home(pid), name))
+                if os.path.isdir(path):
+                    for root, _, files in os.walk(path):
+                        freed += sum(os.path.getsize(os.path.join(root, f)) for f in files)
+                    shutil.rmtree(path)
+                else:
+                    freed += os.path.getsize(path)
+                    os.remove(path)
+            state["status"] = "published"
+            self.save_state(pid, state)
+            self.log("%s published by the library: freed %d MB" % (pid, freed // 2 ** 20))
+
+    # ---------------------------------------------------------------- selection and download
+    def select(self, home, tender):
         """Read the page, list the files and decide each one. Writes the tender's selection."""
         pid = tender["pid"]
-        home = os.path.join(self.folder(batch_id), "tenders", pid)
-        os.makedirs(os.path.join(home, "files"), exist_ok=True)
         page = eis_fetch.Tender(pid, os.path.join(home, "work"),
                                 register_uuid=(tender.get("notice") or {}).get("uuid"))
         records, files, taken = page.records(), [], 0
@@ -387,17 +548,18 @@ class Downloader:
                 "decision": decision, "reason": reason, "stored": None, "size": None,
                 "sha256": None}
 
-    def download(self, batch_id, selected):
+    def download(self, home, selected, beat):
         """Download every kept file not yet complete; sort the members of archives.
 
-        The selection is saved after every file, so a run stopped by sleep or a lost network
-        starts again at the first unfinished file. A file is renamed into place only once it is
-        whole, so one found on disk is taken as it is."""
+        Before each file the lease must still be this computer's. A file EIS refuses is left
+        for the next attempt and the others go on; FilesFailed then names them. The selection
+        is saved after every file, so a run stopped by sleep or a lost network starts again at
+        the first unfinished file. A file is renamed into place only once it is whole, so one
+        found on disk is taken as it is."""
         pid = selected["pid"]
-        home = os.path.join(self.folder(batch_id), "tenders", pid)
         page = None
         records = {str(r["id"]): r for r in selected["records"]}
-        last_bytes, out, files = 0, [], selected["files"]
+        last_bytes, out, files, failed = 0, [], selected["files"], []
         for n, f in enumerate(files):
             if f["decision"] != selection.DOWNLOAD or f["archive"]:
                 out.append(f)
@@ -407,6 +569,8 @@ class Downloader:
             if f.get("sha256") and os.path.exists(target) and os.path.getsize(target) == f["size"]:
                 out.append(f)
                 continue
+            if beat.lost.is_set():
+                raise LeaseGone("the lease of %s lapsed or went to another computer" % pid)
             record = records[str(f["record_id"])]
             if not os.path.exists(target):
                 if page is None:
@@ -414,14 +578,22 @@ class Downloader:
                 if last_bytes:
                     time.sleep(eis_fetch.pause_for(last_bytes))
                 part = target + ".part"
-                if f["file_id"] is None:
-                    page.download_record_zip(record, part)
-                    announced = None
-                else:
-                    announced = page.download_file(record, f["file_id"], part)
-                size = os.path.getsize(part)
-                if announced is not None and announced != size:
-                    raise eis_fetch.Fail("file %s: %d of %d bytes" % (f["name"], size, announced))
+                try:
+                    if f["file_id"] is None:
+                        page.download_record_zip(record, part)
+                        announced = None
+                    else:
+                        announced = page.download_file(record, f["file_id"], part)
+                    size = os.path.getsize(part)
+                    if announced is not None and announced != size:
+                        raise eis_fetch.Fail("%d of %d bytes" % (size, announced))
+                except eis_fetch.Withdrawn:
+                    raise
+                except eis_fetch.Fail as exc:
+                    self.log("  file %s not downloaded: %s" % (f["name"], str(exc)[:200]))
+                    failed.append(f["name"])
+                    out.append(f)
+                    continue
                 os.replace(part, target)
                 last_bytes = size
             f = dict(f, stored=stored, size=os.path.getsize(target),
@@ -433,6 +605,8 @@ class Downloader:
             save_json(os.path.join(home, "selection.json"), selected)
         selected["files"] = out
         save_json(os.path.join(home, "selection.json"), selected)
+        if failed:
+            raise FilesFailed("%d files not downloaded, e.g. %s" % (len(failed), failed[0]))
         return selected
 
     def wait_for_network(self):
@@ -498,286 +672,226 @@ class Downloader:
                     os.remove(target)
         return decided
 
-    def fetch_tender(self, batch_id, tender):
-        """Selection, then download. Returns the new tender status."""
-        home = os.path.join(self.folder(batch_id), "tenders", tender["pid"])
-        try:
-            selected = load_json(os.path.join(home, "selection.json"))
-            if not selected:
-                selected = self.select(batch_id, tender)
-            self.download(batch_id, selected)
-            kept = sum(1 for f in selected["files"] if f["decision"] == selection.DOWNLOAD)
-            skipped = sum(1 for f in selected["files"] if f["decision"] == selection.SKIP)
-            self.log("  %s downloaded: %d files kept, %d skipped" % (tender["pid"], kept, skipped))
-            return "downloaded", None
-        except eis_fetch.Withdrawn as exc:
-            self.log("  %s withdrawn: %s" % (tender["pid"], exc))
-            return "withdrawn", str(exc)[:300]
-        except eis_fetch.Offline as exc:
-            self.log("  %s: the portal is out of reach: %s" % (tender["pid"], str(exc)[:200]))
-            return "offline", str(exc)[:300]
-        except Exception as exc:
-            self.log("  %s not finished: %s" % (tender["pid"], str(exc)[:300]))
-            return "pending", str(exc)[:300]
-
-    # ---------------------------------------------------------------- the batch
-    def run_batch(self, batch_id, state):
-        """Download, upload, dispatch. Returns the final status of the batch."""
-        folder = self.folder(batch_id)
-        self.log = Log(os.path.join(folder, "log.txt"))
-        if state["status"] == "downloading":
-            notify("Tender batch %s" % batch_id, "Downloading %d tenders" % len(state["tenders"]))
-            for tender in state["tenders"]:
-                if tender["status"] != "pending":
-                    continue
-                self.log("[%s] %s" % (tender["pid"], "watched" if tender.get("watched") else "new"))
-                status, error = self.fetch_tender(batch_id, tender)
-                while status == "offline" and self.wait_for_network():
-                    status, error = self.fetch_tender(batch_id, tender)
-                if status == "offline":
-                    # A lost network is no fault of the tender: it keeps its attempts.
-                    self.log("the network did not come back; the batch waits for the next run")
-                    break
-                tender["attempts"] = tender.get("attempts", 0) + (status == "pending")
-                tender["error"] = error
-                if status == "pending" and tender["attempts"] >= MAX_ATTEMPTS:
-                    status = "failed"
-                tender["status"] = status
-                self.save(batch_id, state)
-            waiting = [t["pid"] for t in state["tenders"] if t["status"] == "pending"]
-            if waiting:
-                self.log("batch interrupted: %d tenders left for the next run" % len(waiting))
-                notify("Tender batch %s interrupted" % batch_id,
-                       "%d tenders left for the next run. Log: %s"
-                       % (len(waiting), os.path.join(folder, "log.txt")))
-                return "interrupted"
-        if state["status"] in ("downloading",):
+    def fetch(self, tender, beat):
+        """Selection, then download, through a lost network. Returns (outcome, detail):
+        downloaded, withdrawn, lease lost, interrupted or attempt_failed."""
+        pid = tender["pid"]
+        home = self.home(pid)
+        while True:
             try:
-                self.upload(batch_id, state)
+                selected = load_json(os.path.join(home, "selection.json"))
+                if not selected:
+                    selected = self.select(home, tender)
+                self.download(home, selected, beat)
+                kept = sum(1 for f in selected["files"] if f["decision"] == selection.DOWNLOAD)
+                skipped = sum(1 for f in selected["files"] if f["decision"] == selection.SKIP)
+                self.log("  %s downloaded: %d files kept, %d skipped" % (pid, kept, skipped))
+                return "downloaded", None
+            except LeaseGone as exc:
+                return "lease lost", str(exc)
+            except eis_fetch.Withdrawn as exc:
+                self.log("  %s withdrawn: %s" % (pid, exc))
+                return "withdrawn", str(exc)[:300]
+            except eis_fetch.Offline as exc:
+                # A lost network is no fault of the tender: it keeps its attempts.
+                self.log("  %s: the portal is out of reach: %s" % (pid, str(exc)[:200]))
+                if not self.wait_for_network():
+                    return "interrupted", "the network stayed down for two hours"
+                if not beat.beat():
+                    return "lease lost", "the lease lapsed while the network was down"
             except Exception as exc:
-                self.log("copy interrupted: %s" % exc)
-                notify("Tender batch %s: copy to the library failed" % batch_id,
-                       "It is copied again at the next run. Log: %s"
-                       % os.path.join(folder, "log.txt"))
-                return "copy interrupted"
-        if state["status"] in ("uploaded", "failed"):
-            if not self.wait_for_sync(batch_id, state):
-                notify("Tender batch %s: OneDrive is still uploading" % batch_id,
-                       "Processing starts at the next run. Log: %s"
-                       % os.path.join(folder, "log.txt"))
-                return "waiting for OneDrive"
-            if not self.dispatch(batch_id, state):
-                notify("Tender batch %s: processing not started" % batch_id,
-                       "It is started again at the next run. Log: %s"
-                       % os.path.join(folder, "log.txt"))
-                return "dispatch failed"
-        counts = {s: sum(1 for t in state["tenders"] if t["status"] == s)
-                  for s in ("downloaded", "withdrawn", "failed")}
-        self.log("batch handed over: %(downloaded)d downloaded, %(withdrawn)d withdrawn, "
-                 "%(failed)d failed" % counts)
-        notify("Tender batch %s handed over" % batch_id,
-               "%d downloaded, %d withdrawn, %d failed. Log: %s"
-               % (counts["downloaded"], counts["withdrawn"], counts["failed"],
-                  os.path.join(folder, "log.txt")))
-        return "handed over"
+                self.log("  %s not finished: %s" % (pid, str(exc)[:300]))
+                return "attempt_failed", str(exc)[:300]
 
-    def manifest(self, batch_id, state):
-        tenders = []
-        for tender in state["tenders"]:
-            home = os.path.join(self.folder(batch_id), "tenders", tender["pid"])
-            selected = load_json(os.path.join(home, "selection.json"), {}) \
-                if tender["status"] == "downloaded" else {}
-            files = [dict(f, stored="%s/%s" % (tender["pid"], f["stored"]) if f.get("stored")
-                          else None) for f in selected.get("files", [])]
-            tenders.append({"pid": tender["pid"], "status": tender["status"],
-                            "watched": bool(tender.get("watched")),
-                            "notice": tender.get("notice"), "error": tender.get("error"),
-                            "url": selected.get("url"),
-                            "procurement": selected.get("procurement"),
-                            "records": selected.get("records", []), "files": files})
-        return {"schema": "batch-manifest/1", "batch_id": batch_id, "country": self.country,
-                "window": state["window"], "date": state["date"], "created": state["created"],
-                "tenders": tenders}
+    # ---------------------------------------------------------------- the hand-over
+    def manifest(self, day, given, tender, status, detail):
+        pid = tender["pid"]
+        selected = load_json(os.path.join(self.home(pid), "selection.json"), {}) \
+            if status == "downloaded" else {}
+        files = [dict(f, stored="%s/%s" % (pid, f["stored"]) if f.get("stored") else None)
+                 for f in selected.get("files", [])]
+        return {"schema": "tender-manifest/1", "country": self.country, "date": given["date"],
+                "pid": pid, "lease": given["lease"], "computer": self.computer,
+                "window": day["window"],
+                "tender": {"pid": pid, "status": status, "watched": tender["watched"],
+                           "notice": tender.get("notice"), "error": detail,
+                           "url": selected.get("url"), "procurement": selected.get("procurement"),
+                           "records": selected.get("records", []), "files": files}}
 
-    def upload(self, batch_id, state):
-        inbox = "%s/inbox/%s" % (self.work, batch_id)
-        uploaded = state.setdefault("uploaded", {})
-        manifest = self.manifest(batch_id, state)
-        for tender in manifest["tenders"]:
-            for f in tender["files"]:
-                if f["decision"] != selection.DOWNLOAD or not f["stored"]:
-                    continue
-                f["inbox"] = f["stored"] + INBOX_SUFFIX
-                if f["inbox"] in uploaded:
-                    continue
-                local = os.path.join(self.folder(batch_id), "tenders", tender["pid"], "files",
-                                     f["stored"].split("/", 1)[1])
-                uploaded[f["inbox"]] = self.library.upload("%s/%s" % (inbox, f["inbox"]), local)
-                self.save(batch_id, state)
-        path = os.path.join(self.folder(batch_id), "manifest.json")
-        save_json(path, manifest)
-        self.library.upload(inbox + "/manifest.json", path, replace=True)
-        state["status"] = "uploaded"
-        self.save(batch_id, state)
-        self.log("copied %d files and the manifest to %s" % (len(uploaded), inbox))
-
-    def wait_for_sync(self, batch_id, state):
-        """True once OneDrive has carried every file of the batch and its manifest."""
-        inbox = "%s/inbox/%s" % (self.work, batch_id)
-        manifest = load_json(os.path.join(self.folder(batch_id), "manifest.json"), {})
-        paths = ["%s/%s" % (inbox, f["inbox"]) for t in manifest.get("tenders", [])
-                 for f in t.get("files", []) if f.get("inbox")]
+    def copy(self, inbox, manifest):
+        """Copy the kept files, then the manifest last. Returns every library path copied."""
+        pid = manifest["pid"]
+        paths = []
+        for f in manifest["tender"]["files"]:
+            if f["decision"] != selection.DOWNLOAD or not f["stored"]:
+                continue
+            f["inbox"] = f["stored"] + INBOX_SUFFIX
+            local = os.path.join(self.home(pid), "files", f["stored"].split("/", 1)[1])
+            self.library.upload("%s/%s" % (inbox, f["inbox"]), local)
+            paths.append("%s/%s" % (inbox, f["inbox"]))
+        local = os.path.join(self.home(pid), "manifest.json")
+        save_json(local, manifest)
+        self.library.upload(inbox + "/manifest.json", local, replace=True)
         paths.append(inbox + "/manifest.json")
+        return paths
+
+    def wait_for_sync(self, paths):
+        """True once the sync client has carried every copied file and the manifest."""
+        total = len(paths)
         deadline = time.monotonic() + SYNC_WAIT
         while True:
             waiting = self.library.not_in_sync(paths)
             if not waiting:
-                self.log("OneDrive has carried all %d files to the library" % len(paths))
+                self.log("  the sync client has carried all %d files to the library" % total)
                 return True
             if time.monotonic() >= deadline:
-                self.log("OneDrive has not carried %d of %d files yet, e.g. %s"
-                         % (len(waiting), len(paths), waiting[0]))
+                self.log("  the sync client has not carried %d of %d files yet, e.g. %s"
+                         % (len(waiting), total, waiting[0]))
                 return False
             paths = waiting
             time.sleep(SYNC_PAUSE)
 
-    def dispatch(self, batch_id, state):
-        repo = self.settings["github_repo"]
-        url = "https://api.github.com/repos/%s/actions/workflows/%s/dispatches" % (
-            repo, self.settings.get("workflow", "process-batch.yml"))
-        body = json.dumps({"ref": self.settings.get("ref", "master"),
-                           "inputs": {"batch_id": batch_id}}).encode()
-        req = urllib.request.Request(url, data=body, method="POST", headers={
-            "Authorization": "Bearer " + self.github_token,
-            "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28",
-            "User-Agent": "eis-tool/1"})
+    def hand_over(self, day, given, tender, status, detail, state):
+        pid, lease, date = tender["pid"], given["lease"], given["date"]
+        handover_id = "%s-%s" % (pid, lease)
+        inbox = "%s/inbox/%s" % (self.work, handover_id)
         try:
-            with urllib.request.urlopen(req, timeout=60) as resp:
-                ok = resp.status == 204
-        except (urllib.error.URLError, OSError) as exc:
-            self.log("dispatch refused: %s" % exc)
-            ok = False
-        state["status"] = "processing_requested" if ok else "failed"
-        if ok:
-            state["dispatched_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        self.save(batch_id, state)
-        return ok
+            paths = self.copy(inbox, self.manifest(day, given, tender, status, detail))
+        except Exception as exc:
+            self.log("  copy into the library interrupted: %s" % exc)
+            return self.release(given, "interrupted", "copy: %s" % str(exc)[:200])
+        if not self.wait_for_sync(paths):
+            return self.release(given, "interrupted", "the sync client did not carry the files")
+        try:
+            answer = self.coordinator.handover(date, pid, lease)
+        except coordinator.Error as exc:
+            self.log("  hand-over not recorded: %s" % exc)
+            return "interrupted"
+        if not answer.get("accepted"):
+            self.log("  %s was handed over by another computer first" % pid)
+            state.update(status="superseded", handover_id=handover_id)
+            self.save_state(pid, state)
+            return "superseded"
+        state.update(status="handed over", handover_id=handover_id,
+                     handed_over_at=stamp(now_utc()))
+        self.save_state(pid, state)
+        self.log("  %s handed over as %s; processing %s" % (
+            pid, handover_id, "started" if answer.get("dispatched") else "to be started by the coordinator"))
+        return "handed over"
 
-    def recheck(self, batch_id, state):
-        """A batch handed over without a completion record in the library is sent again."""
-        record = self.library.read_text("%s/batches/%s/complete.json" % (self.work, batch_id))
-        if record:
-            state["status"] = "complete"
-            self.save(batch_id, state)
-            self.free_space(batch_id)
-            return False
-        sent = state.get("dispatched_at") or ""
-        if sent and time.time() - calendar.timegm(time.strptime(sent, "%Y-%m-%dT%H:%M:%SZ")) < 6 * 3600:
-            return False
-        state["status"] = "downloading"
-        state["uploaded"] = {}
-        self.save(batch_id, state)
-        return True
+    def release(self, given, outcome, detail):
+        """Give the tender back to the coordinator. A coordinator out of reach lets the lease
+        lapse instead, which has the same effect 20 minutes later."""
+        try:
+            answer = self.coordinator.release(given["date"], given["pid"], given["lease"],
+                                              outcome, detail)
+        except coordinator.Error as exc:
+            self.log("  release not recorded (%s); the lease lapses instead" % exc)
+            return outcome.replace("_", " ")
+        if answer.get("failed"):
+            notify("Tender %s failed" % given["pid"],
+                   "%s attempts; the coordinator reports it. %s" % (answer.get("attempts"), detail))
+        self.log("  %s released: %s (%s attempts)" % (given["pid"], outcome, answer.get("attempts")))
+        return outcome.replace("_", " ")
 
-    def free_space(self, batch_id):
-        """Delete everything of a complete batch but its state and its log. A batch takes 9 to
-        15 GB; kept, a week of them would fill the laptop. Until the library holds the batch's
-        completion record the files stay, because the batch may be copied and dispatched again."""
-        folder = self.folder(batch_id)
-        names = [n for n in os.listdir(folder) if n not in KEPT_AFTER_COMPLETE]
-        if not names:
-            return
-        freed = 0
-        for name in names:
-            path = archives.long_path(os.path.join(folder, name))
-            if os.path.isdir(path):
-                for root, _, files in os.walk(path):
-                    freed += sum(os.path.getsize(os.path.join(root, f)) for f in files)
-                shutil.rmtree(path)
-            else:
-                freed += os.path.getsize(path)
-                os.remove(path)
-        Log(os.path.join(folder, "log.txt"))("processing confirmed by the library: freed %d MB"
-                                              % (freed // 2 ** 20))
+    # ---------------------------------------------------------------- the take loop
+    def work_one(self, given):
+        """One tender, from its lease to its hand-over. Returns the outcome."""
+        pid, lease, date = str(given["pid"]), given["lease"], given["date"]
+        given = dict(given, pid=pid)
+        self.log("[%s] lease %s, %s" % (pid, lease, "watched" if given.get("watched") else "new"))
+        state = self.take_up(pid, date, lease)
+        with Heartbeat(lambda: self.coordinator.confirm(date, pid, lease), log=self.log) as beat:
+            day = self.wait_for_day(date, beat)
+            if day is None:
+                if beat.lost.is_set():
+                    return "lease lost"
+                return self.release(given, "interrupted", "the day's work list did not arrive")
+            entry = next((t for t in day.get("tenders", []) if str(t.get("pid")) == pid), {})
+            tender = {"pid": pid, "watched": bool(given.get("watched", entry.get("watched"))),
+                      "notice": entry.get("notice")}
+            status, detail = self.fetch(tender, beat)
+            if status == "lease lost":
+                self.log("  %s: %s" % (pid, detail))
+                return "lease lost"
+            if status in ("interrupted", "attempt_failed"):
+                return self.release(given, status, detail)
+            # The coordinator takes a hand-over under an older lease while nobody has handed the
+            # tender over, so a lease lost from here on does not stop it.
+            return self.hand_over(day, given, tender, status, detail, state)
 
-    def plan(self, since=None, now=False):
-        """A new batch from the moment the last batch listed the register to this moment.
-
-        A scheduled run starts at most one batch a day; `now` (the desktop shortcut) starts
-        one whenever it is pressed.
-        """
-        if not now and not since and self.started_today():
-            return None, None
-        end = now_utc()
-        last = self.last_window_end()
-        start = moment(since) if since else (last or end - dt.timedelta(days=1))
-        if start >= end:
-            return None, None
-        batch_id = self.next_id(riga_today())
-        os.makedirs(self.folder(batch_id), exist_ok=True)
-        self.log = Log(os.path.join(self.folder(batch_id), "log.txt"))
-        self.log("window %s to %s" % (stamp(start), stamp(end)))
-        state = {"batch_id": batch_id, "country": self.country, "status": "downloading",
-                 "window": {"from": stamp(start), "to": stamp(end)},
-                 "date": end.astimezone(riga()).date().isoformat(),
-                 "created": stamp(end),
-                 "tenders": self.list_new(start, end)}
-        self.save(batch_id, state)
-        return batch_id, state
-
-    def run(self, since=None, now=False):
+    def run(self, since=None):
+        """Join the day, then take tenders until none is left. Returns [(pid, outcome)]."""
+        self.log = Log(os.path.join(self.root, "logs", "%s.txt" % riga_today().isoformat()))
         self.read_rules()
+        self.free_space()
+        self.join(since)
         results = []
-        for batch_id, state in self.batches():
-            if state["status"] == "processing_requested":
-                self.recheck(batch_id, state)
-            elif state["status"] == "complete":
-                self.free_space(batch_id)
-            if state["status"] in OPEN:
-                results.append((batch_id, self.run_batch(batch_id, state)))
-                if results[-1][1] != "handed over":
-                    return results
-        batch_id, state = self.plan(since, now)
-        if batch_id:
-            results.append((batch_id, self.run_batch(batch_id, state)))
-        return results
+        deadline = time.monotonic() + DAY_WAIT
+        while True:
+            given = self.coordinator.take()
+            kind = given.get("answer")
+            if kind == "none":
+                self.log("no tender left for this computer")
+                return results
+            if kind == "wait":
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("the day's work list was not opened within two hours")
+                time.sleep(given.get("retry_after_seconds") or DAY_PAUSE)
+                continue
+            if kind != "tender":
+                raise coordinator.Error("take answered %r" % kind)
+            outcome = self.work_one(given)
+            results.append((str(given["pid"]), outcome))
+            if outcome == "interrupted":
+                # The network or the sync client is gone; the next wake, network join or
+                # sign-in starts a run again.
+                self.log("run interrupted; the next run goes on")
+                return results
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="Download one daily batch of tenders.")
-    ap.add_argument("--since", help="start of a new batch's window, YYYY-MM-DD or an ISO timestamp")
-    ap.add_argument("--now", action="store_true",
-                    help="start a new batch even if one was started today")
+    ap = argparse.ArgumentParser(description="Download the day's tenders, one at a time.")
+    ap.add_argument("--since", help="start of the window when this computer lists a day and no "
+                                    "day's work list exists yet, YYYY-MM-DD or an ISO timestamp")
     ap.add_argument("--settings", default=SETTINGS)
     args = ap.parse_args(argv)
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
     settings = load_json(args.settings)
-    if not settings:
-        print("no settings at %s: run setup/install.ps1" % args.settings, file=sys.stderr)
+    if not settings or not settings.get("coordinator_url") or not settings.get("tenders"):
+        print("no settings, or settings of an earlier version, at %s: run setup/install.ps1"
+              % args.settings, file=sys.stderr)
         return 2
-    lock = Lock(os.path.join(settings["batches"], "downloader.lock"))
+    lock = Lock(os.path.join(settings["tenders"], "downloader.lock"))
     if not lock.take():
-        print("another batch is running; this run is skipped")
+        print("another run is working; this run is skipped")
         return 0
     try:
         if not os.path.isdir(os.path.join(settings["library_root"], *settings["library_project"].split("/"))):
-            notify("Tender batch not started", "The synced library folder is not on this computer")
+            notify("Tender download not started", "The synced library folder is not on this computer")
             print("the synced library folder %s does not hold %s: is OneDrive syncing it?"
                   % (settings["library_root"], settings["library_project"]), file=sys.stderr)
             return 3
+        client = coordinator.Client(settings["coordinator_url"],
+                                    secret("coordinator-client-id", "COORDINATOR_CLIENT_ID"),
+                                    secret("coordinator-client-secret", "COORDINATOR_CLIENT_SECRET"))
+        computer = settings.get("computer") or os.environ.get("COMPUTERNAME") or socket.gethostname()
         downloader = Downloader(settings, library=synced.Library(settings["library_root"]),
-                                monday_token=secret("monday", "MONDAY_TOKEN"),
-                                github_token=secret("github", "GITHUB_TOKEN"))
-        results = downloader.run(args.since, args.now)
-        for batch_id, result in results:
-            print("%s: %s" % (batch_id, result))
-        if not results:
-            print("nothing to do: today's batch is already handed over")
-        return 0 if all(r == "handed over" for _, r in results) else 1
+                                client=client, monday_token=secret("monday", "MONDAY_TOKEN"),
+                                computer=computer)
+        results = downloader.run(args.since)
+        for pid, outcome in results:
+            print("%s: %s" % (pid, outcome))
+        counts = {}
+        for _, outcome in results:
+            counts[outcome] = counts.get(outcome, 0) + 1
+        if results:
+            notify("Tender downloads", ", ".join("%d %s" % (n, o) for o, n in sorted(counts.items())))
+        return 1 if any(o == "interrupted" for _, o in results) else 0
     except Exception as exc:
-        notify("Tender batch failed", str(exc)[:200])
+        notify("Tender download failed", str(exc)[:200])
         traceback.print_exc()
         return 1
     finally:

@@ -2,6 +2,7 @@
 One run of the Tender batch downloader: update the code from the repository, then run it.
 Started by the scheduled task and by the desktop shortcut.
 #>
+# -Now is what the shortcut of an earlier install passes; every run now starts at once.
 param([switch]$Now)
 $ErrorActionPreference = "Continue"
 $home_dir = Join-Path $env:LOCALAPPDATA "eis-tool"
@@ -14,9 +15,7 @@ git -C $app pull --ff-only --quiet 2>&1 | Out-File -Append -Encoding utf8 $log
 
 Push-Location $app
 $env:PYTHONIOENCODING = "utf-8"
-$extra = @()
-if ($Now) { $extra += "--now" }
-& $vpy download_batch.py @extra 2>&1 | Out-File -Append -Encoding utf8 $log
+& $vpy download_batch.py 2>&1 | Out-File -Append -Encoding utf8 $log
 $code = $LASTEXITCODE
 Pop-Location
 exit $code
