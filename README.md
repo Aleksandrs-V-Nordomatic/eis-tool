@@ -66,7 +66,7 @@ language is compared only on the fields that do not depend on it.
 | Window: from the moment the last handed-over batch listed the register to this run; the scheduled task starts at most one batch a day, the desktop shortcut starts one at once | `Downloader.plan` |
 | Notices of the window, the recall gate, the watch list | `harvest.py`, `policy.py`, `watchlist.py` |
 | Each tender: read the page, list the files of each current record, decide each file, download the kept ones (`.part`, size check, sha256) | `eis_fetch.Tender`, `selection.py` |
-| An archive with skipped members: its kept members travel on their own | `archives.py` |
+| An archive with skipped members: its kept members travel on their own, unpacked in one pass over the archive | `archives.py` |
 | Copy the kept files, then `manifest.json`, into the synced library folder | `Downloader.upload` |
 | Wait until OneDrive shows every one of them as an in-sync placeholder, up to two hours; otherwise the next run waits again | `Downloader.wait_for_sync`, `synced.Library.not_in_sync` |
 | Start `process-batch.yml` with the batch id | `Downloader.dispatch` |

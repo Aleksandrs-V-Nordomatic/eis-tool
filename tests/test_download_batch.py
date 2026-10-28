@@ -234,6 +234,21 @@ class Run(unittest.TestCase):
         self.assertFalse(any(n.endswith("Pielikumi.zip") for n in uploaded))
         self.assertTrue(any(n.endswith("Darba_uzdevums.docx") or n.endswith("Darba uzdevums.docx") for n in uploaded))
 
+    def test_each_archive_is_unpacked_in_one_pass_over_its_kept_members(self):
+        passes, real = [], download_batch.archives.extract_many
+
+        def recorded(path, picks):
+            passes.append((os.path.basename(path), [member for member, _ in picks]))
+            real(path, picks)
+
+        self.patch(download_batch.archives, "extract_many", recorded)
+        self.dl.run()
+        first = [p for p in passes if p[0].endswith("Projekts.zip")]
+        inner = [p for p in passes if p[0].endswith("Pielikumi.zip")]
+        self.assertEqual(len(first), 2)  # one pass for each of the two tenders
+        self.assertEqual(first[0][1], ["Teksts/Tehniska specifikacija.pdf", "Pielikumi.zip"])
+        self.assertEqual(inner[0][1], ["Darba uzdevums.docx"])
+
     def test_an_interrupted_batch_is_resumed_and_nothing_new_is_planned(self):
         FakeTender.failures = {"300": 1}
         first = self.dl.run()
