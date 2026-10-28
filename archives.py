@@ -140,16 +140,17 @@ def extract_many(path, picks):
                               creationflags=NO_WINDOW)
         if proc.returncode != 0:
             raise Unreadable(proc.stderr.decode("utf-8", "replace")[:200] or "7-Zip failed")
-        missing = [m for m, _ in picks if not os.path.isfile(_long(os.path.join(out, *m.split("/"))))]
+        missing = [m for m, _ in picks
+                   if not os.path.isfile(long_path(os.path.join(out, *m.split("/"))))]
         if missing:
             raise Unreadable("no member %r" % missing[0])
         for member, dest in picks:
-            os.replace(_long(os.path.join(out, *member.split("/"))), dest)
+            os.replace(long_path(os.path.join(out, *member.split("/"))), dest)
     finally:
-        shutil.rmtree(_long(scratch), ignore_errors=True)
+        shutil.rmtree(long_path(scratch), ignore_errors=True)
 
 
-def _long(path):
+def long_path(path):
     """A Windows path that may run past 260 characters: members sit deep in their folders."""
     if os.name != "nt" or path.startswith("\\\\?\\"):
         return path

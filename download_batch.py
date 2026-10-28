@@ -19,6 +19,7 @@ import datetime as dt
 import json
 import os
 import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -46,6 +47,9 @@ SYNC_WAIT = 2 * 3600
 SYNC_PAUSE = 20
 MAX_NESTING = 3
 OPEN = ("downloading", "uploaded", "failed")
+# What a batch keeps once the library has confirmed its processing: enough to know its window
+# and what happened to it.
+KEPT_AFTER_COMPLETE = ("state.json", "log.txt")
 # How long a run waits for a lost network to come back before it leaves the batch to the next
 # run (the task starts one when the laptop wakes or reconnects), and how often it looks.
 NETWORK_WAIT = 2 * 3600
@@ -665,6 +669,7 @@ class Downloader:
         if record:
             state["status"] = "complete"
             self.save(batch_id, state)
+            self.free_space(batch_id)
             return False
         sent = state.get("dispatched_at") or ""
         if sent and time.time() - calendar.timegm(time.strptime(sent, "%Y-%m-%dT%H:%M:%SZ")) < 6 * 3600:
@@ -673,6 +678,27 @@ class Downloader:
         state["uploaded"] = {}
         self.save(batch_id, state)
         return True
+
+    def free_space(self, batch_id):
+        """Delete everything of a complete batch but its state and its log. A batch takes 9 to
+        15 GB; kept, a week of them would fill the laptop. Until the library holds the batch's
+        completion record the files stay, because the batch may be copied and dispatched again."""
+        folder = self.folder(batch_id)
+        names = [n for n in os.listdir(folder) if n not in KEPT_AFTER_COMPLETE]
+        if not names:
+            return
+        freed = 0
+        for name in names:
+            path = archives.long_path(os.path.join(folder, name))
+            if os.path.isdir(path):
+                for root, _, files in os.walk(path):
+                    freed += sum(os.path.getsize(os.path.join(root, f)) for f in files)
+                shutil.rmtree(path)
+            else:
+                freed += os.path.getsize(path)
+                os.remove(path)
+        Log(os.path.join(folder, "log.txt"))("processing confirmed by the library: freed %d MB"
+                                              % (freed // 2 ** 20))
 
     def plan(self, since=None, now=False):
         """A new batch from the moment the last batch listed the register to this moment.
@@ -705,6 +731,8 @@ class Downloader:
         for batch_id, state in self.batches():
             if state["status"] == "processing_requested":
                 self.recheck(batch_id, state)
+            elif state["status"] == "complete":
+                self.free_space(batch_id)
             if state["status"] in OPEN:
                 results.append((batch_id, self.run_batch(batch_id, state)))
                 if results[-1][1] != "handed over":

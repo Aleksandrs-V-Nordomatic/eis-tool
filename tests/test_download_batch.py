@@ -249,6 +249,35 @@ class Run(unittest.TestCase):
         self.assertEqual(first[0][1], ["Teksts/Tehniska specifikacija.pdf", "Pielikumi.zip"])
         self.assertEqual(inner[0][1], ["Darba uzdevums.docx"])
 
+    def test_a_batch_the_library_has_finished_gives_its_disk_space_back(self):
+        self.dl.run()
+        folder = os.path.join(self.root, "LV-20261026-0001")
+        self.assertTrue(os.path.isdir(os.path.join(folder, "tenders")))
+        self.library.files["p/work/LV/batches/LV-20261026-0001/complete.json"] = json.dumps(
+            {"batch_id": "LV-20261026-0001"})
+        self.dl.run()
+        self.assertEqual(sorted(os.listdir(folder)), ["log.txt", "state.json"])
+        state = download_batch.load_json(os.path.join(folder, "state.json"))
+        self.assertEqual(state["status"], "complete")
+
+    def test_a_batch_still_waiting_for_its_processing_keeps_its_files(self):
+        self.dl.run()
+        self.dl.run()
+        self.assertTrue(os.path.isdir(os.path.join(self.root, "LV-20261026-0001", "tenders")))
+
+    def test_a_batch_finished_before_this_version_is_cleaned_as_well(self):
+        folder = os.path.join(self.root, "LV-20261025-0001")
+        os.makedirs(os.path.join(folder, "tenders", "100", "files"))
+        with open(os.path.join(folder, "tenders", "100", "files", "000_spec.pdf"), "wb") as fh:
+            fh.write(b"spec")
+        download_batch.save_json(os.path.join(folder, "state.json"), {
+            "batch_id": "LV-20261025-0001", "country": "LV", "status": "complete",
+            "window": {"from": "2026-10-24T09:30:00Z", "to": "2026-10-25T09:00:00Z"},
+            "created": "2026-10-25T09:00:00Z", "tenders": []})
+        self.dl.run()
+        self.assertFalse(os.path.exists(os.path.join(folder, "tenders")))
+        self.assertTrue(os.path.exists(os.path.join(folder, "state.json")))
+
     def test_an_interrupted_batch_is_resumed_and_nothing_new_is_planned(self):
         FakeTender.failures = {"300": 1}
         first = self.dl.run()
