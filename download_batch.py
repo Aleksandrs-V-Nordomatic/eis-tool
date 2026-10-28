@@ -465,25 +465,30 @@ class Downloader:
         archive_entry["decision"] = "unpacked"
         archive_entry["reason"] = "members sorted; the kept ones travel on their own"
         prefix = archive_entry["slot"].split("_", 1)[0]
-        decided = []
+        entries = []
         for i, member in enumerate(names):
             name = member.split("/")[-1]
             kind = self.rules.kind_of(name, folders=member.split("/")[:-1],
                                       archive=archive_entry["name"], record_title=record["title"],
                                       type_title=record.get("type_title"))
             decision, reason = self.rules.decide(kind, record["section"])
-            m = dict(archive_entry, archive=label, member=member, name=name, kind=kind,
-                     decision=decision, reason=reason, stored=None, size=None, sha256=None,
-                     slot="%s.%03d_%s" % (prefix, i, safe_name(name, 80)))
+            entries.append(dict(archive_entry, archive=label, member=member, name=name, kind=kind,
+                                decision=decision, reason=reason, stored=None, size=None,
+                                sha256=None, slot="%s.%03d_%s" % (prefix, i, safe_name(name, 80))))
+        kept = [m for m in entries if m["decision"] == selection.DOWNLOAD]
+        # Members already on disk came out whole in an earlier run; the rest come out together.
+        archives.extract_many(path, [(m["member"], os.path.join(home, "files", m["slot"]))
+                                     for m in kept
+                                     if not os.path.exists(os.path.join(home, "files", m["slot"]))])
+        decided = []
+        for m in entries:
             decided.append(m)
-            if decision != selection.DOWNLOAD:
+            if m["decision"] != selection.DOWNLOAD:
                 continue
             target = os.path.join(home, "files", m["slot"])
-            if not os.path.exists(target):
-                archives.extract(path, member, target)
             m.update(stored=m["slot"], size=os.path.getsize(target),
                      sha256=eis_fetch.sha256_file(target))
-            if depth < MAX_NESTING and self.is_archive(name, target):
+            if depth < MAX_NESTING and self.is_archive(m["name"], target):
                 decided += self.sort_archive(home, m, record, depth + 1)
                 if m["decision"] == "unpacked":
                     os.remove(target)
