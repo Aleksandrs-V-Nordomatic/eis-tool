@@ -2,6 +2,7 @@ import datetime as dt
 import json
 import os
 import shutil
+import sys
 import tempfile
 import time
 import unittest
@@ -342,6 +343,15 @@ class Run(unittest.TestCase):
         self.assertEqual(self.coordinator.made("open")[0][2], ["100", "300"])
         self.assertEqual(self.day()["computer"], "PC-B")
 
+    def test_the_log_names_no_card_and_no_local_copy_of_the_day_stays(self):
+        self.patch(watchlist, "keys", lambda token, settings: (["EIS:300", "EIS:x1"], ["Card 7 of a client"]))
+        self.dl.run()
+        with open(os.path.join(self.root, "logs", "downloader.log"), encoding="utf-8") as fh:
+            log = fh.read()
+        self.assertNotIn("Card 7 of a client", log)
+        self.assertIn("1 watched cards without a key", log)
+        self.assertFalse([n for n in os.listdir(self.root) if n.startswith("day-")])
+
     # ------------------------------------------------------------ joining the day
     def test_a_computer_waits_while_another_lists_the_day(self):
         self.opened_by_another_computer()
@@ -641,26 +651,154 @@ def _wait(event, seconds=2):
     return event.wait(seconds)
 
 
-class Main(unittest.TestCase):
-    def test_settings_of_the_batch_version_are_refused(self):
-        folder = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, folder, ignore_errors=True)
-        path = os.path.join(folder, "downloader.json")
-        download_batch.save_json(path, {"country": "LV", "batches": folder, "github_repo": "o/r"})
-        self.assertEqual(download_batch.main(["--settings", path]), 2)
+class Keyring:
+    """Windows Credential Manager under the service eis-tool, in memory."""
+
+    def __init__(self, values):
+        self.values = values
+
+    def get_password(self, service, name):
+        return self.values.get((service, name))
+
+
+class Doctor(unittest.TestCase):
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
+        kit = os.path.join(self.root, "lib", "p", "kit", "LV")
+        os.makedirs(kit)
+        for name in ("recall_policy.json", "document_rules.json", "watch_list.json"):
+            with open(os.path.join(kit, name), "w") as fh:
+                fh.write("{}")
+        self.settings = {"country": "LV", "library_root": os.path.join(self.root, "lib"),
+                         "library_project": "p", "kit": "kit/LV", "tenders": self.root,
+                         "coordinator_url": "https://coordinator.invalid"}
+        self.keyring = Keyring({("eis-tool", "monday"): "m-token",
+                                ("eis-tool", "coordinator"): "id-1.access:secret-1"})
+        real = sys.modules.get("keyring")
+        sys.modules["keyring"] = self.keyring
+        self.addCleanup(lambda: sys.modules.__setitem__("keyring", real) if real
+                        else sys.modules.pop("keyring", None))
+        original = download_batch.archives.seven_zip
+        download_batch.archives.seven_zip = lambda: "7z"
+        self.addCleanup(setattr, download_batch.archives, "seven_zip", original)
+        which = download_batch.shutil.which
+        download_batch.shutil.which = lambda name: "curl" if name == "curl" else which(name)
+        self.addCleanup(setattr, download_batch.shutil, "which", which)
+
+    def test_a_ready_computer_has_nothing_missing(self):
+        self.assertEqual(download_batch.doctor(self.settings, system=False), [])
+
+    def test_settings_of_the_batch_version_are_named(self):
+        problems = download_batch.doctor({"country": "LV", "batches": self.root, "github_repo": "o/r"},
+                                         system=False)
+        self.assertIn("setting coordinator_url is missing", problems)
+        self.assertIn("setting tenders is missing", problems)
+
+    def test_a_missing_kit_file_and_a_missing_credential_are_named_never_shown(self):
+        os.remove(os.path.join(self.root, "lib", "p", "kit", "LV", "watch_list.json"))
+        del self.keyring.values[("eis-tool", "monday")]
+        self.keyring.values[("eis-tool", "coordinator")] = "no-secret-here"
+        problems = download_batch.doctor(self.settings, system=False)
+        self.assertIn("the kit file watch_list.json is not in the synced library folder", problems)
+        self.assertIn("the credential monday is missing or malformed in Credential Manager", problems)
+        self.assertIn("the credential coordinator is missing or malformed in Credential Manager", problems)
+        self.assertFalse(any("no-secret-here" in p for p in problems))
+
+    def test_a_secret_in_the_environment_is_not_read(self):
+        del self.keyring.values[("eis-tool", "monday")]
+        os.environ["MONDAY_TOKEN"] = "from-the-environment"
+        self.addCleanup(os.environ.pop, "MONDAY_TOKEN", None)
+        with self.assertRaises(RuntimeError):
+            download_batch.secret("monday")
+
+    def test_the_access_token_is_one_credential(self):
+        self.assertEqual(download_batch.access_token("id-1.access:secret-1"), ("id-1.access", "secret-1"))
+        with self.assertRaises(RuntimeError):
+            download_batch.access_token("id-1.access")
+
+    def test_main_stops_before_the_lock_when_something_is_missing(self):
+        path = os.path.join(self.root, "downloader.json")
+        download_batch.save_json(path, dict(self.settings, coordinator_url=""))
+        self.assertEqual(download_batch.main(["--settings", path]), 4)
+        self.assertFalse(os.path.exists(os.path.join(self.root, "downloader.lock")))
+
+    def test_the_computer_is_its_windows_computer_name(self):
+        was = os.environ.get("COMPUTERNAME")
+        os.environ["COMPUTERNAME"] = "PC-0042"
+        self.addCleanup(lambda: os.environ.__setitem__("COMPUTERNAME", was) if was
+                        else os.environ.pop("COMPUTERNAME", None))
+        self.assertEqual(download_batch.computer_name(), "PC-0042")
+
+
+class LogTest(unittest.TestCase):
+    def setUp(self):
+        self.folder = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.folder, ignore_errors=True)
+        self.path = os.path.join(self.folder, "logs", "downloader.log")
+
+    def read(self, path=None):
+        with open(path or self.path, encoding="utf-8") as fh:
+            return [line.split(" ", 2)[2] for line in fh.read().splitlines()]
+
+    def test_a_repeated_line_is_counted_not_repeated(self):
+        log = download_batch.Log(self.path)
+        for _ in range(5):
+            log("  lease not confirmed this time: no network")
+        log("the network is back")
+        self.assertEqual(self.read(), ["  lease not confirmed this time: no network",
+                                       "the line before was repeated 4 more times",
+                                       "the network is back"])
+
+    def test_the_log_rotates_at_its_size_and_keeps_a_few_files(self):
+        original = download_batch.LOG_MAX
+        download_batch.LOG_MAX = 200
+        self.addCleanup(setattr, download_batch, "LOG_MAX", original)
+        log = download_batch.Log(self.path)
+        for n in range(60):
+            log("line %d of the run" % n)
+        names = sorted(os.listdir(os.path.dirname(self.path)))
+        self.assertEqual(names, ["downloader.log", "downloader.log.1", "downloader.log.2",
+                                 "downloader.log.3"])
+        self.assertLessEqual(os.path.getsize(self.path), 250)
+        self.assertEqual(self.read()[-1], "line 59 of the run")
 
 
 class LockTest(unittest.TestCase):
+    def setUp(self):
+        self.folder = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.folder, ignore_errors=True)
+        self.path = os.path.join(self.folder, "l")
+
     def test_one_run_at_a_time(self):
-        folder = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, folder, ignore_errors=True)
-        first = download_batch.Lock(os.path.join(folder, "l"))
-        second = download_batch.Lock(os.path.join(folder, "l"))
+        first = download_batch.Lock(self.path)
+        second = download_batch.Lock(self.path)
         self.assertTrue(first.take())
         self.assertFalse(second.take())
         first.release()
         self.assertTrue(second.take())
         second.release()
+
+    def test_the_lock_names_its_process_by_id_and_start_time(self):
+        lock = download_batch.Lock(self.path)
+        self.assertTrue(lock.take())
+        self.addCleanup(lock.release)
+        owner = download_batch.load_json(self.path)
+        self.assertEqual(owner["pid"], os.getpid())
+        self.assertIsNotNone(owner["started"])
+        self.assertEqual(owner["started"], download_batch.process_start(os.getpid()))
+
+    def test_a_running_process_id_with_another_start_time_does_not_hold_the_lock(self):
+        download_batch.save_json(self.path, {"pid": os.getpid(), "started": 1, "since": 0})
+        lock = download_batch.Lock(self.path)
+        self.assertTrue(lock.take())
+        lock.release()
+
+    def test_a_lock_of_a_process_that_ended_is_taken_over(self):
+        download_batch.save_json(self.path, {"pid": 2 ** 22 + 7, "started": 5, "since": 0})
+        lock = download_batch.Lock(self.path)
+        self.assertTrue(lock.take())
+        lock.release()
 
 
 class SaveTest(unittest.TestCase):

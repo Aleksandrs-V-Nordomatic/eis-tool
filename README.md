@@ -108,7 +108,8 @@ live (`coordinator.LeaseLost`). `coordinator.py` is the client.
 
 | Step | Where |
 |---|---|
-| Lock, so one run works at a time on the computer | `download_batch.Lock` |
+| Check everything a run needs and stop, naming what is missing: settings, the kit in the synced folder, both credentials (by name), tzdata, 7-Zip, curl, the scheduled task, OneDrive running, the code at `origin/master` without local changes | `download_batch.doctor` |
+| Lock, so one run works at a time on the computer; the lock names its process by id and start time, so a dead run's lock is taken over at once | `download_batch.Lock` |
 | Read the three kit files from the library folder OneDrive syncs to the computer | `synced.py` |
 | Empty the folder of every tender whose publication record is in the library; only its `state.json` stays | `Downloader.free_space` |
 | Join the day; wait while another computer lists it | `Downloader.join` |
@@ -132,7 +133,9 @@ after every file, and a downloaded file or unpacked member is renamed into place
 whole, so a tender given again the same day starts at the first unfinished file; a folder left
 by another day is emptied first. Records of the archive section (replaced versions) are listed
 by title and not opened. Windows notifications report a tender that failed for good and the end
-of a run; the day's log is in `C:\radar\tenders\logs\<date>.txt`.
+of a run. The log is `C:\radar\tenders\logs\downloader.log`, rotated at 1 MB with three earlier
+files kept; a line repeated at once is counted, not written again, and the log names tenders by
+EIS number only, never a card, a file name or document text.
 
 ### Install on a computer
 
@@ -142,20 +145,27 @@ Needs Windows, Python 3.12+, Git, 7-Zip, and the Automations library synced by O
 powershell -ExecutionPolicy Bypass -File setup\install.ps1 -LibraryProject "<project folder in the library>" -CoordinatorUrl "<Coordinator API address>"
 ```
 
-It clones this repository to `%LOCALAPPDATA%\eis-tool\app`, makes a Python environment, writes
-`%USERPROFILE%\.eis-tool\downloader.json` (the coordinator's address, this computer's name from
-`-Computer` or `COMPUTERNAME`, the tender folder `C:\radar\tenders`), asks for the person's
-monday.com token (read access to the board) and for this computer's Cloudflare Access service
-token (client id and secret) and keeps them in the Windows Credential Manager, removes a GitHub
-token an earlier version stored, finds the library's synced folder (or takes `-LibraryFolder`),
-registers the task **Tender Radar LV download** (daily at 10:00, at sign-in, two minutes after
-the computer wakes and two minutes after it joins a network) and puts the shortcut **Tender
+It clones this repository to `%LOCALAPPDATA%\eis-tool\app`, makes a Python environment from
+`requirements-laptop.txt`, writes `%USERPROFILE%\.eis-tool\downloader.json` (the coordinator's
+address and the tender folder `C:\radar\tenders`), asks for each missing credential and keeps it
+in the Windows Credential Manager under the service `eis-tool`: `monday` (the person's
+monday.com token, read access to the board) and `coordinator` (this computer's Cloudflare Access
+service token, kept as `<client id>:<client secret>`); `-NewCredentials` asks again. It removes a
+GitHub token an earlier version stored, finds the library's synced folder (or takes
+`-LibraryFolder`), registers the task **Tender Radar LV download** (daily at 10:00 local time
+with no UTC offset, at sign-in, two minutes after the computer wakes and two minutes after it
+joins a network, one instance at a time, stopped after 12 hours) and puts the shortcut **Tender
 Radar LV** on the desktop. Both start PowerShell under `conhost.exe --headless`, so no console
-window opens that a click could close and stop the run. Each run updates the clone from
-`master` first. The computer holds no GitHub token: the coordinator starts the workflow.
+window opens that a click could close and stop the run. It ends with the doctor. Each run
+updates the clone from `master` first and starts with the doctor. The computer is named by its
+Windows computer name, and it holds no GitHub token: the coordinator starts the workflow.
+Secrets are read only from Credential Manager, never from a file or the environment.
 
-Run by hand: `python download_batch.py`, or `--since YYYY-MM-DD` for the first day's work list
-when the library holds none.
+`install.ps1 -Uninstall` removes the task, the shortcut, both credentials, the settings, the code
+with its environment and `C:\radar\tenders`.
+
+Run by hand: `python download_batch.py`, `--since YYYY-MM-DD` for the first day's work list
+when the library holds none, or `--doctor` to check the computer and stop.
 
 ## The workflow
 

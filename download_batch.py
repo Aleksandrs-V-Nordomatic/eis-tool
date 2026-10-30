@@ -13,9 +13,12 @@ the sync client keeps it on this computer, waits until every file is carried to 
 hands the tender over. The coordinator starts the processing workflow. It converts, judges and
 publishes nothing.
 
+    python download_batch.py --doctor      check what a run needs, and stop
+
 Settings: %USERPROFILE%\\.eis-tool\\downloader.json (written by setup/install.ps1).
-Credentials: Windows Credential Manager (the person's monday.com token; this computer's
-Cloudflare Access service token for the Coordinator API).
+Credentials: Windows Credential Manager, service `eis-tool`, one name per service: `monday` (the
+person's monday.com token) and `coordinator` (this computer's Cloudflare Access service token,
+`<client id>:<client secret>`). The computer is named by its Windows computer name.
 """
 
 import argparse
@@ -41,7 +44,12 @@ import synced
 import watchlist
 
 SETTINGS = os.path.join(os.path.expanduser("~"), ".eis-tool", "downloader.json")
-LOG_CAP = 5 * 1024 * 1024
+SETTINGS_KEYS = ("country", "library_root", "library_project", "kit", "tenders", "coordinator_url")
+CREDENTIALS = ("monday", "coordinator")
+TASK = "Tender Radar LV download"
+# The log rotates at this size and keeps this many earlier files.
+LOG_MAX = 1024 * 1024
+LOG_KEEP = 3
 # SharePoint rewrites the Office files it receives, so their size and hash change; under this
 # suffix the inbox keeps the bytes that were downloaded. The manifest names each file's inbox name.
 INBOX_SUFFIX = ".bin"
@@ -65,19 +73,13 @@ KEPT_AFTER_PUBLISHED = ("state.json",)
 
 
 def riga():
-    try:
-        from zoneinfo import ZoneInfo
-        return ZoneInfo("Europe/Riga")
-    except Exception:
-        return dt.timezone(dt.timedelta(hours=2))
+    # From the pinned tzdata package (requirements-laptop.txt), never from the computer's settings.
+    from zoneinfo import ZoneInfo
+    return ZoneInfo("Europe/Riga")
 
 
 def now_utc():
     return dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
-
-
-def riga_today():
-    return now_utc().astimezone(riga()).date()
 
 
 def moment(text):
@@ -132,25 +134,44 @@ def safe_name(name, limit=120):
 
 
 class Log:
-    """The day's log, capped; the record when a notification is not shown."""
+    """The downloader's log on this computer: rotated at LOG_MAX into `.1` .. `.LOG_KEEP`, and a
+    line repeated at once is counted instead of written again. It names tenders by EIS number
+    and holds no card names, file names or document text."""
 
     def __init__(self, path):
         self.path = path
+        self.last = None
+        self.repeats = 0
 
     def __call__(self, line):
+        if line == self.last:
+            self.repeats += 1
+            return
+        if self.repeats:
+            self._write("the line before was repeated %d more times" % self.repeats)
+        self.last, self.repeats = line, 0
+        self._write(line)
+
+    def _write(self, line):
         text = "%s %s" % (time.strftime("%Y-%m-%d %H:%M:%S"), line)
         try:
             print(text, flush=True)
         except UnicodeEncodeError:
             pass
         try:
-            if os.path.exists(self.path) and os.path.getsize(self.path) > LOG_CAP:
-                return
             os.makedirs(os.path.dirname(self.path), exist_ok=True)
+            if os.path.exists(self.path) and os.path.getsize(self.path) >= LOG_MAX:
+                self._rotate()
             with open(self.path, "a", encoding="utf-8") as fh:
                 fh.write(text + "\n")
         except OSError:
             pass
+
+    def _rotate(self):
+        for n in range(LOG_KEEP - 1, 0, -1):
+            if os.path.exists("%s.%d" % (self.path, n)):
+                os.replace("%s.%d" % (self.path, n), "%s.%d" % (self.path, n + 1))
+        os.replace(self.path, self.path + ".1")
 
 
 def notify(title, text):
@@ -178,10 +199,9 @@ def notify(title, text):
         pass
 
 
-def secret(name, env_name):
-    value = os.environ.get(env_name)
-    if value:
-        return value
+def secret(name):
+    """A credential of the `eis-tool` service from Windows Credential Manager, never from a file
+    or the environment."""
     import keyring
     value = keyring.get_password("eis-tool", name)
     if not value:
@@ -189,8 +209,25 @@ def secret(name, env_name):
     return value
 
 
+def access_token(value):
+    """(client id, client secret) of the `coordinator` credential, kept as `<id>:<secret>`."""
+    client_id, _, client_secret = (value or "").partition(":")
+    if not client_id or not client_secret:
+        raise RuntimeError("the coordinator credential is not <client id>:<client secret>: "
+                           "run setup/install.ps1")
+    return client_id, client_secret
+
+
+def computer_name():
+    """The Windows computer name: what the coordinator, the manifest and the day's work list
+    call this computer. Never a person's name."""
+    return os.environ.get("COMPUTERNAME") or socket.gethostname()
+
+
 class Lock:
-    """One run at a time on this machine."""
+    """One run at a time on this machine. The lock names its process by id and start time, so
+    a lock left by a process that died, or whose id Windows has given to another process, is
+    taken over at once."""
 
     def __init__(self, path):
         self.path = path
@@ -199,8 +236,9 @@ class Lock:
     def take(self):
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
         if os.path.exists(self.path):
-            owner = load_json(self.path, {}).get("pid")
-            if owner and _alive(owner):
+            owner = load_json(self.path, {})
+            started = process_start(owner.get("pid"))
+            if started is not None and started == owner.get("started"):
                 return False
             os.remove(self.path)
         try:
@@ -208,7 +246,8 @@ class Lock:
         except FileExistsError:
             return False
         with os.fdopen(fd, "w") as fh:
-            json.dump({"pid": os.getpid(), "since": time.time()}, fh)
+            json.dump({"pid": os.getpid(), "started": process_start(os.getpid()),
+                       "since": time.time()}, fh)
         self.held = True
         return True
 
@@ -217,22 +256,131 @@ class Lock:
             os.remove(self.path)
 
 
-def _alive(pid):
+def process_start(pid):
+    """When the process with this id started, as a number; None when no such process runs."""
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return None
     if os.name == "nt":
         import ctypes
+        from ctypes import wintypes as w
         kernel = ctypes.windll.kernel32
-        handle = kernel.OpenProcess(0x1000, False, int(pid))
+        handle = kernel.OpenProcess(0x1000, False, pid)
         if not handle:
-            return False
-        code = ctypes.c_ulong()
-        kernel.GetExitCodeProcess(handle, ctypes.byref(code))
-        kernel.CloseHandle(handle)
-        return code.value == 259
+            return None
+        try:
+            code = ctypes.c_ulong()
+            kernel.GetExitCodeProcess(handle, ctypes.byref(code))
+            if code.value != 259:
+                return None
+            times = [w.FILETIME() for _ in range(4)]
+            if not kernel.GetProcessTimes(handle, *(ctypes.byref(t) for t in times)):
+                return None
+            return (times[0].dwHighDateTime << 32) | times[0].dwLowDateTime
+        finally:
+            kernel.CloseHandle(handle)
     try:
-        os.kill(int(pid), 0)
-        return True
-    except OSError:
+        with open("/proc/%d/stat" % pid, encoding="ascii") as fh:
+            return int(fh.read().rsplit(")", 1)[1].split()[19])
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+# --------------------------------------------------------------------------- doctor
+def _quiet(cmd, timeout=60):
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
+                          creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+
+
+def code_version(app=None):
+    """(commit, problem): the commit this code runs at, and why it is not the reviewed one."""
+    app = app or os.path.dirname(os.path.abspath(__file__))
+    try:
+        head = _quiet(["git", "-C", app, "rev-parse", "HEAD"]).stdout.strip()
+        reviewed = _quiet(["git", "-C", app, "rev-parse", "origin/master"]).stdout.strip()
+        changed = _quiet(["git", "-C", app, "status", "--porcelain",
+                          "--untracked-files=no"]).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return None, "git is not on PATH"
+    if not head:
+        return None, "the code is not a clone of the repository"
+    if changed:
+        return head, "the code has local changes"
+    if head != reviewed:
+        return head, "the code is not at origin/master"
+    return head, None
+
+
+def task_problems():
+    """What is wrong with the scheduled task, compared with what setup/install.ps1 registers."""
+    script = ("$t = Get-ScheduledTask -TaskName '%s' -ErrorAction SilentlyContinue; if ($t) { "
+              "@{state = [string]$t.State; instances = [string]$t.Settings.MultipleInstances; "
+              "starts = @($t.Triggers | ForEach-Object { $_.StartBoundary })} "
+              "| ConvertTo-Json }" % TASK)
+    try:
+        out = _quiet(["powershell", "-NoProfile", "-NonInteractive", "-Command", script]).stdout
+        task = json.loads(out) if out.strip() else None
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return ["the scheduled task could not be read"]
+    if not task:
+        return ["the scheduled task %s is not registered" % TASK]
+    problems = []
+    if task.get("state") == "Disabled":
+        problems.append("the scheduled task is disabled")
+    if task.get("instances") != "IgnoreNew":
+        problems.append("the scheduled task does not run one instance at a time")
+    if any(re.search(r"(Z|[+-]\d\d:\d\d)$", start or "") for start in task.get("starts") or []):
+        problems.append("the scheduled task's start time carries a UTC offset")
+    return problems
+
+
+def sync_client_running():
+    try:
+        out = _quiet(["tasklist", "/FI", "IMAGENAME eq OneDrive.exe", "/NH"]).stdout
+    except (OSError, subprocess.SubprocessError):
         return False
+    return "onedrive.exe" in out.lower()
+
+
+def doctor(settings, system=True):
+    """Everything a run needs, as a list of what is missing; empty when the computer is ready.
+    Credentials are named, never shown. `system` adds the checks of the computer itself: the
+    scheduled task, the sync client and the code version."""
+    problems = ["setting %s is missing" % k for k in SETTINGS_KEYS if not (settings or {}).get(k)]
+    if problems:
+        return problems
+    try:
+        riga()
+    except Exception:
+        problems.append("the tzdata package is missing")
+    project = os.path.join(settings["library_root"], *settings["library_project"].split("/"))
+    if not os.path.isdir(project):
+        problems.append("the synced library folder does not hold the project")
+    else:
+        kit = os.path.join(project, *settings["kit"].strip("/").split("/"))
+        for name in ("recall_policy.json", "document_rules.json", "watch_list.json"):
+            if not os.path.isfile(os.path.join(kit, name)):
+                problems.append("the kit file %s is not in the synced library folder" % name)
+    for name in CREDENTIALS:
+        try:
+            value = secret(name)
+            if name == "coordinator":
+                access_token(value)
+        except Exception:
+            problems.append("the credential %s is missing or malformed in Credential Manager" % name)
+    if not archives.seven_zip():
+        problems.append("7-Zip is not installed")
+    if not shutil.which("curl"):
+        problems.append("curl is not on PATH")
+    if system:
+        problems += task_problems()
+        if not sync_client_running():
+            problems.append("OneDrive is not running, so nothing reaches the library")
+        problem = code_version()[1]
+        if problem:
+            problems.append(problem)
+    return problems
 
 
 class Heartbeat:
@@ -299,6 +447,7 @@ class Downloader:
         self.coordinator = client
         self.monday_token = monday_token
         self.computer = computer
+        self.version = None
         self.log = print
 
     # ---------------------------------------------------------------- rules
@@ -373,8 +522,8 @@ class Downloader:
             pid = url.rstrip("/").rsplit("/", 1)[-1]
             tenders.setdefault(pid, {"pid": pid, "watched": False, "notice": notice})
         found, keyless = watchlist.keys(self.monday_token, self.watch)
-        for name in keyless:
-            self.log("watched card without a key, not fetched: %s" % name)
+        if keyless:
+            self.log("%d watched cards without a key, not fetched" % len(keyless))
         for key in found:
             prefix, _, value = key.partition(":")
             pid = value.strip() if prefix.upper() == "EIS" else None
@@ -382,7 +531,7 @@ class Downloader:
                 url = harvest.resolve(value.strip())
                 pid = url.rstrip("/").rsplit("/", 1)[-1] if url else None
             if not pid or not pid.isdigit():
-                self.log("watched card key not usable: %s" % key)
+                self.log("a watched card's key is not usable")
                 continue
             tenders.setdefault(pid, {"pid": pid, "notice": None})["watched"] = True
         self.log("day: %d tenders, %d of them watched"
@@ -412,10 +561,12 @@ class Downloader:
                    "window": {"from": stamp(start), "to": stamp(end)},
                    "opened_at": stamp(now_utc()), "computer": self.computer,
                    "tenders": [dict(t, position=n) for n, t in enumerate(tenders, 1)]}
-            local = os.path.join(self.root, "days", "%s.json" % date)
-            os.makedirs(os.path.dirname(local), exist_ok=True)
+            local = os.path.join(self.root, "day-%s.json" % date)
             save_json(local, day)
-            self.library.upload(self.day_path(date), local, replace=True)
+            try:
+                self.library.upload(self.day_path(date), local, replace=True)
+            finally:
+                os.remove(local)
         answer = self.coordinator.open_day(date, lease, day["window"], day["tenders"])
         self.log("the day's work list is open: %s tenders" % answer.get("positions"))
         return day
@@ -590,8 +741,8 @@ class Downloader:
                 except eis_fetch.Withdrawn:
                     raise
                 except eis_fetch.Fail as exc:
-                    self.log("  file %s not downloaded: %s" % (f["name"], str(exc)[:200]))
-                    failed.append(f["name"])
+                    self.log("  file %s not downloaded: %s" % (f["slot"][:3], str(exc)[:200]))
+                    failed.append(f["slot"][:3])
                     out.append(f)
                     continue
                 os.replace(part, target)
@@ -606,7 +757,7 @@ class Downloader:
         selected["files"] = out
         save_json(os.path.join(home, "selection.json"), selected)
         if failed:
-            raise FilesFailed("%d files not downloaded, e.g. %s" % (len(failed), failed[0]))
+            raise FilesFailed("%d files not downloaded: %s" % (len(failed), ", ".join(failed)))
         return selected
 
     def wait_for_network(self):
@@ -634,7 +785,7 @@ class Downloader:
         try:
             names = archives.members(path)
         except archives.Unreadable as exc:
-            self.log("  archive %s kept whole: %s" % (archive_entry["name"], exc))
+            self.log("  archive %s kept whole: %s" % (archive_entry["slot"][:3], type(exc).__name__))
             return []
         if not names:
             return []
@@ -822,7 +973,8 @@ class Downloader:
 
     def run(self, since=None):
         """Join the day, then take tenders until none is left. Returns [(pid, outcome)]."""
-        self.log = Log(os.path.join(self.root, "logs", "%s.txt" % riga_today().isoformat()))
+        self.log = Log(os.path.join(self.root, "logs", "downloader.log"))
+        self.log("run on %s, code %s" % (self.computer, (self.version or "unknown")[:12]))
         self.read_rules()
         self.free_space()
         self.join(since)
@@ -855,32 +1007,30 @@ def main(argv=None):
     ap.add_argument("--since", help="start of the window when this computer lists a day and no "
                                     "day's work list exists yet, YYYY-MM-DD or an ISO timestamp")
     ap.add_argument("--settings", default=SETTINGS)
+    ap.add_argument("--doctor", action="store_true", help="check what a run needs, and stop")
     args = ap.parse_args(argv)
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")
     settings = load_json(args.settings)
-    if not settings or not settings.get("coordinator_url") or not settings.get("tenders"):
-        print("no settings, or settings of an earlier version, at %s: run setup/install.ps1"
-              % args.settings, file=sys.stderr)
-        return 2
+    problems = doctor(settings)
+    if args.doctor or problems:
+        for line in problems:
+            print("missing: %s" % line, file=sys.stderr)
+        if problems and not args.doctor:
+            notify("Tender download not started", "; ".join(problems)[:200])
+        print("doctor: %s" % ("ready" if not problems else "%d problems" % len(problems)))
+        return 4 if problems else 0
     lock = Lock(os.path.join(settings["tenders"], "downloader.lock"))
     if not lock.take():
         print("another run is working; this run is skipped")
         return 0
     try:
-        if not os.path.isdir(os.path.join(settings["library_root"], *settings["library_project"].split("/"))):
-            notify("Tender download not started", "The synced library folder is not on this computer")
-            print("the synced library folder %s does not hold %s: is OneDrive syncing it?"
-                  % (settings["library_root"], settings["library_project"]), file=sys.stderr)
-            return 3
-        client = coordinator.Client(settings["coordinator_url"],
-                                    secret("coordinator-client-id", "COORDINATOR_CLIENT_ID"),
-                                    secret("coordinator-client-secret", "COORDINATOR_CLIENT_SECRET"))
-        computer = settings.get("computer") or os.environ.get("COMPUTERNAME") or socket.gethostname()
+        client = coordinator.Client(settings["coordinator_url"], *access_token(secret("coordinator")))
         downloader = Downloader(settings, library=synced.Library(settings["library_root"]),
-                                client=client, monday_token=secret("monday", "MONDAY_TOKEN"),
-                                computer=computer)
+                                client=client, monday_token=secret("monday"),
+                                computer=computer_name())
+        downloader.version = code_version()[0]
         results = downloader.run(args.since)
         for pid, outcome in results:
             print("%s: %s" % (pid, outcome))
