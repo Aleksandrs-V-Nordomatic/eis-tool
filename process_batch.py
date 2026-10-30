@@ -1,35 +1,38 @@
-"""Tender document processing: one handed-over batch, on a GitHub runner.
+"""Tender document processing: one handed-over tender, on a GitHub runner.
 
-    python process_batch.py --batch-id LV-20261026-0001
+    python process_batch.py --handover-id 900001-2 --country LV
 
-Reads the batch from the staging folder of the library, checks it against its manifest,
-converts each tender's documents to text, publishes the tender folders, writes the day files
-and the completion record, removes the staged batch and starts the analysis routine.
-It never connects to IUB or EIS.
+Reads the tender's hand-over `inbox/<pid>-<lease>/` from the staging folder of the library and
+checks it against its manifest. An incomplete hand-over is put back on the day's work list at
+the Tender download coordinator and nothing else is written. A complete one is converted to
+text, published as `tenders/<pid>/` with this publication's list of changes, recorded in
+`published/<pid>-<lease>.json` last, and its hand-over removed. It never connects to IUB or
+EIS and starts nothing.
 
 Environment: GRAPH_TENANT_ID, GRAPH_CLIENT_ID, GRAPH_CLIENT_SECRET, GRAPH_DRIVE_ID,
-GRAPH_DEST_ROOT (the folder holding the country folders), and optionally ROUTINE_FIRE_URL
-and ROUTINE_FIRE_TOKEN.
+GRAPH_DEST_ROOT (the folder holding the country folders), COORDINATOR_URL,
+COORDINATOR_CLIENT_ID, COORDINATOR_CLIENT_SECRET, EIS_COUNTRY (or --country).
 """
 
 import argparse
+import datetime as dt
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
 import time
-import urllib.error
-import urllib.request
 
 import changes
+import coordinator
 import country
 import eis_fetch
 import graph
 import publish
 
-FIRE_TRIES = 3
 OCR_FILES = 40
+HANDOVER_ID = re.compile(r"^(\d{1,12})-(\d{1,9})$")
 
 
 def say(line):
@@ -37,24 +40,22 @@ def say(line):
 
 
 class Incomplete(Exception):
-    """The staged batch does not match its manifest."""
+    """The hand-over does not match its manifest (Tender complete, rules 1 and 2)."""
 
 
 def check(drive, inbox, manifest, work):
-    """Download every kept file of the batch and compare it with the manifest."""
-    for tender in manifest["tenders"]:
-        if tender["status"] != "downloaded":
+    """Download every kept file of the tender and compare it with the manifest."""
+    tender = manifest["tender"]
+    folder = os.path.join(work, tender["pid"], "documents", "actual")
+    os.makedirs(folder, exist_ok=True)
+    for f in tender["files"]:
+        if f["decision"] != "download":
             continue
-        folder = os.path.join(work, tender["pid"], "documents", "actual")
-        os.makedirs(folder, exist_ok=True)
-        for f in tender["files"]:
-            if f["decision"] != "download":
-                continue
-            local = os.path.join(folder, f["stored"].split("/", 1)[1])
-            if not drive.download("%s/%s" % (inbox, f.get("inbox") or f["stored"]), local):
-                raise Incomplete("a kept file of tender %s is missing" % tender["pid"])
-            if os.path.getsize(local) != f["size"] or eis_fetch.sha256_file(local) != f["sha256"]:
-                raise Incomplete("a kept file of tender %s differs from the manifest" % tender["pid"])
+        local = os.path.join(folder, f["stored"].split("/", 1)[1])
+        if not drive.download("%s/%s" % (inbox, f.get("inbox") or f["stored"]), local):
+            raise Incomplete("a kept file is missing")
+        if os.path.getsize(local) != f["size"] or eis_fetch.sha256_file(local) != f["sha256"]:
+            raise Incomplete("a kept file differs from the manifest")
 
 
 RECORD_FIELDS = ("id", "section", "title", "document_link_type_code", "type_title", "type_code",
@@ -100,6 +101,7 @@ def pack_manifest(tender):
 def convert(work, tender):
     """Build the pack and convert it. Returns the pack folder."""
     pack = os.path.join(work, tender["pid"])
+    os.makedirs(pack, exist_ok=True)
     with open(os.path.join(pack, "procurement.json"), "w", encoding="utf-8") as fh:
         json.dump(tender.get("procurement") or {}, fh, ensure_ascii=False, indent=2)
     with open(os.path.join(pack, "manifest.json"), "w", encoding="utf-8") as fh:
@@ -120,8 +122,10 @@ def read_scans(pack):
     return 0
 
 
-def publish_tender(drive, base, pack, pid, date, run_id):
-    """Upload one tender folder. Returns (change record, day entry)."""
+def publish_tender(drive, base, pack, tender, date, run_id):
+    """Upload one tender folder, with this publication's list of changes, `index.json` last.
+    Returns the list of changes."""
+    pid = tender["pid"]
     files, manifest, structures = publish.flatten(pack)
     recognised = publish.ocr_documents(pack)
     files += [(doc["path"], data) for doc, data in recognised]
@@ -143,141 +147,117 @@ def publish_tender(drive, base, pack, pid, date, run_id):
     contents = publish.tender_members(files, pid, structures,
                                       json.dumps(dict(entry, date=date), ensure_ascii=False)
                                       .encode("utf-8"))
+    index = None
     if changes.refreshed(record):
         wanted = {"doc/%s.md" % k for k in changes.documents_to_send(record, current)}
         wanted |= {doc["path"] for doc, _ in recognised}
         drive.upload("%s/%s.zip" % (root, pid), publish.tender_archive(contents))
         for rel, data in contents:
-            if not rel.startswith("doc/") or rel in wanted:
+            if rel == "index.json":
+                index = data
+            elif not rel.startswith("doc/") or rel in wanted:
                 drive.upload("%s/%s" % (root, rel), data)
         drive.upload(root + "/state.json", json.dumps(current, ensure_ascii=False).encode("utf-8"))
     drive.upload(root + "/seen.json", json.dumps(changes.seen(pid, was_seen, record, date),
                                                  ensure_ascii=False).encode("utf-8"))
     drive.upload("%s/runs/%s.json" % (root, date),
                  json.dumps(record, ensure_ascii=False).encode("utf-8"))
-    return record, entry
+    moved = dict(record, pid=pid, watched=bool(tender.get("watched")),
+                 path="%s/runs/%s.json" % (home, date))
+    drive.upload(root + "/changes.json", json.dumps(moved, ensure_ascii=False).encode("utf-8"))
+    if index is not None:
+        drive.upload(root + "/index.json", index)
+    return moved
 
 
-def fire(batch_id):
-    """Start the analysis routine for the batch. False leaves it for the scheduled run."""
-    url, token = os.environ.get("ROUTINE_FIRE_URL"), os.environ.get("ROUTINE_FIRE_TOKEN")
-    if not url or not token:
-        say("the routine trigger is not configured; the scheduled run picks the batch up")
+def put_back(handover_id, date, reason, client=None):
+    """Tell the coordinator to give the tender out again. False when it could not be told."""
+    try:
+        client = client or coordinator.Client(os.environ.get("COORDINATOR_URL"),
+                                              os.environ.get("COORDINATOR_CLIENT_ID"),
+                                              os.environ.get("COORDINATOR_CLIENT_SECRET"))
+        client.put_back(date, handover_id, reason)
+        return True
+    except coordinator.Error as exc:
+        say("the coordinator was not told: %s" % exc)
         return False
-    body = json.dumps({"text": "batch_id=%s" % batch_id}).encode()
-    for attempt in range(FIRE_TRIES):
-        req = urllib.request.Request(url, data=body, method="POST", headers={
-            "Authorization": "Bearer " + token, "Content-Type": "application/json",
-            "anthropic-version": "2023-06-01",
-            "anthropic-beta": "experimental-cc-routine-2026-04-01"})
-        try:
-            with urllib.request.urlopen(req, timeout=60) as resp:
-                if resp.status == 200:
-                    say("analysis requested")
-                    return True
-        except urllib.error.HTTPError as exc:
-            say("routine start refused: HTTP %d" % exc.code)
-            if exc.code < 500 and exc.code != 429:
-                return False
-        except OSError as exc:
-            say("routine start failed: %s" % type(exc).__name__)
-        time.sleep(10 * (attempt + 1))
-    return False
 
 
-def process(drive, base, batch_id, run_id, work):
-    inbox = "%s/inbox/%s" % (base, batch_id)
-    done = "%s/batches/%s/complete.json" % (base, batch_id)
+def riga_today():
+    try:
+        from zoneinfo import ZoneInfo
+        zone = ZoneInfo("Europe/Riga")
+    except Exception:
+        zone = dt.timezone(dt.timedelta(hours=2))
+    return dt.datetime.now(dt.timezone.utc).astimezone(zone).date().isoformat()
+
+
+def process(drive, base, handover_id, run_id, work, client=None):
+    pid, lease = HANDOVER_ID.match(handover_id).groups()
+    inbox = "%s/inbox/%s" % (base, handover_id)
+    done = "%s/published/%s.json" % (base, handover_id)
     if drive.read(done) is not None:
-        say("batch %s was processed before" % batch_id)
+        say("hand-over %s was processed before" % handover_id)
+        drive.delete(inbox)
         return 0
     manifest = drive.read_json(inbox + "/manifest.json")
-    if not manifest:
-        say("batch incomplete: no manifest")
-        return 2
     try:
-        check(drive, inbox, manifest, work)
+        if not manifest:
+            raise Incomplete("no tender manifest")
+        if str(manifest.get("pid")) != pid or str(manifest.get("lease")) != lease \
+                or str((manifest.get("tender") or {}).get("pid")) != pid:
+            raise Incomplete("the manifest is for another hand-over")
+        if manifest["tender"]["status"] == "downloaded":
+            check(drive, inbox, manifest, work)
     except Incomplete as exc:
-        say("batch incomplete: %s" % exc)
+        # A hand-over with no manifest names no date; it can only be of today's list.
+        date = (manifest or {}).get("date") or riga_today()
+        say("hand-over %s incomplete: %s; put back on the day's work list" % (handover_id, exc))
+        put_back(handover_id, date, str(exc), client)
         return 2
-    say("batch %s complete: %d tenders" % (batch_id, len(manifest["tenders"])))
+    tender = manifest["tender"]
+    date = manifest["date"]
+    say("hand-over %s complete" % handover_id)
 
-    date = manifest.get("date") or manifest["window"]["to"][:10]
-    published, failed, moves, entries = [], [], [], []
-    for tender in manifest["tenders"]:
-        if tender["status"] != "downloaded":
-            continue
+    outcome, reason, moved = "published", None, None
+    if tender["status"] != "downloaded":
+        outcome, reason = "failed", "%s: %s" % (tender["status"], (tender.get("error") or "")[:200])
+    else:
         try:
             pack = convert(work, tender)
         except Exception as exc:
-            failed.append({"pid": tender["pid"], "reason": "conversion: %s" % type(exc).__name__})
-            say("  %s not converted: %s" % (tender["pid"], type(exc).__name__))
-            continue
-        record, entry = publish_tender(drive, base, pack, tender["pid"], date, run_id)
-        record["watched"] = tender.get("watched", False)
-        moves.append(dict(record, pid=tender["pid"],
-                          path="tenders/%s/runs/%s.json" % (tender["pid"], date)))
-        entries.append((tender, entry, record))
-        published.append(tender["pid"])
-        say("  %s published (%s)" % (tender["pid"], record["status"]))
-        shutil.rmtree(pack, ignore_errors=True)
-
-    for tender in manifest["tenders"]:
-        if tender["status"] == "failed":
-            failed.append({"pid": tender["pid"], "reason": "download: %s" % (tender.get("error") or "")[:200]})
-    withdrawn = [t["pid"] for t in manifest["tenders"] if t["status"] == "withdrawn"]
-    stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    counts = {}
-    for m in moves:
-        counts[m["status"]] = counts.get(m["status"], 0) + 1
-
-    drive.upload("%s/%s/changes.json" % (base, date), json.dumps({
-        "schema": "day-changes/2", "date": date, "batch_id": batch_id, "run_id": run_id,
-        "written_at": stamp, "counts": dict(counts, tenders=len(moves)), "tenders": moves},
-        ensure_ascii=False).encode("utf-8"))
-    drive.upload("%s/%s/day.json" % (base, date), json.dumps({
-        "schema": "day/2", "date": date, "batch_id": batch_id, "run_id": run_id,
-        "written_at": stamp, "window": manifest["window"],
-        "changes_path": "%s/changes.json" % date, "tenders_path": "tenders",
-        "counts": dict(counts, tenders=len(entries),
-                       documents=sum(len(e["documents"]) for _, e, _ in entries),
-                       skipped=sum(len(e["skipped"]) for _, e, _ in entries)),
-        "tenders": [{"pid": t["pid"], "key": e["key"], "title": e.get("title"),
-                     "status": r["status"], "watched": t.get("watched", False),
-                     "folder_path": e["home"], "index_path": "%s/index.json" % e["home"],
-                     "path": "%s/%s" % (e["home"], e["archive"]),
-                     "run_path": "%s/runs/%s.json" % (e["home"], date),
-                     "documents": len(e["documents"]), "unreadable": len(e["unreadable"]),
-                     "skipped": len(e["skipped"])} for t, e, r in entries],
-        "failed": failed, "withdrawn": withdrawn}, ensure_ascii=False).encode("utf-8"))
+            outcome, reason = "failed", "conversion: %s" % type(exc).__name__
+        else:
+            moved = publish_tender(drive, base, pack, tender, date, run_id)
+            shutil.rmtree(pack, ignore_errors=True)
     drive.upload(done, json.dumps({
-        "schema": "batch-complete/1", "batch_id": batch_id, "country": manifest["country"],
-        "window": manifest["window"], "date": date, "run_id": run_id, "written_at": stamp,
-        "day_path": "%s/day.json" % date, "changes_path": "%s/changes.json" % date,
-        "counts": {"published": len(published), "failed": len(failed),
-                   "withdrawn": len(withdrawn)},
-        "published": published, "failed": failed, "withdrawn": withdrawn},
+        "schema": "tender-published/1", "country": manifest["country"], "date": date,
+        "pid": pid, "lease": manifest["lease"], "computer": manifest.get("computer"),
+        "outcome": outcome, "reason": reason, "run_id": run_id,
+        "written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "tender_path": "tenders/%s/" % pid,
+        "changes_path": "tenders/%s/changes.json" % pid if moved else None},
         ensure_ascii=False).encode("utf-8"))
     drive.delete(inbox)
-    say("batch %s recorded: %d published, %d failed, %d withdrawn"
-        % (batch_id, len(published), len(failed), len(withdrawn)))
-    fire(batch_id)
+    say("tender %s %s%s" % (pid, outcome, " (%s)" % moved["status"] if moved else
+                            ": %s" % reason.split(":", 1)[0]))
     return 0
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="Process one handed-over batch.")
-    ap.add_argument("--batch-id", required=True)
+    ap = argparse.ArgumentParser(description="Process one handed-over tender.")
+    ap.add_argument("--handover-id", required=True, help="<pid>-<lease>, for example 900001-2")
     ap.add_argument("--run-id", default=os.environ.get("GITHUB_RUN_ID", ""))
+    country.add_argument(ap)
     args = ap.parse_args(argv)
-    code = args.batch_id.split("-", 1)[0]
-    if not args.batch_id.replace("-", "").isalnum() or len(args.batch_id) > 40:
-        say("not a batch id")
+    if not HANDOVER_ID.match(args.handover_id):
+        say("not a hand-over id")
         return 2
-    base = country.destination(graph.env("GRAPH_DEST_ROOT"), country.resolve(code, {}))
-    work = tempfile.mkdtemp(prefix="batch_")
+    base = country.destination(graph.env("GRAPH_DEST_ROOT"),
+                               country.resolve(args.country, os.environ))
+    work = tempfile.mkdtemp(prefix="tender_")
     try:
-        return process(graph.Drive(), base, args.batch_id, args.run_id or None, work)
+        return process(graph.Drive(), base, args.handover_id, args.run_id or None, work)
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
