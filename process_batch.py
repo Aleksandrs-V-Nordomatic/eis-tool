@@ -1,6 +1,6 @@
 """Tender document processing: one handed-over tender, on a GitHub runner.
 
-    python process_batch.py --handover-id 900001-2 --country LV
+    python process_batch.py --handover-id 900001-20261026002 --country LV
 
 Reads the tender's hand-over `inbox/<pid>-<lease>/` from the staging folder of the library and
 checks it against its manifest. An incomplete hand-over is put back on the day's work list at
@@ -32,7 +32,9 @@ import graph
 import publish
 
 OCR_FILES = 40
-HANDOVER_ID = re.compile(r"^(\d{1,12})-(\d{1,9})$")
+# <pid>-<lease>. The coordinator owns the lease number (today YYYYMMDD * 1000 + n, eleven
+# digits); this side reads it as any positive integer it can hold, up to 16 digits.
+HANDOVER_ID = re.compile(r"^(\d{1,12})-([1-9]\d{0,15})$")
 
 
 def say(line):
@@ -246,7 +248,8 @@ def process(drive, base, handover_id, run_id, work, client=None):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Process one handed-over tender.")
-    ap.add_argument("--handover-id", required=True, help="<pid>-<lease>, for example 900001-2")
+    ap.add_argument("--handover-id", required=True,
+                    help="<pid>-<lease>, for example 900001-20261026002")
     ap.add_argument("--run-id", default=os.environ.get("GITHUB_RUN_ID", ""))
     country.add_argument(ap)
     args = ap.parse_args(argv)

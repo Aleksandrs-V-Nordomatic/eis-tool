@@ -44,7 +44,9 @@ run.
 ```
 
 `<date>` is the Riga date of the day's work list. `<lease>` is the lease number the
-coordinator gave the computer that downloaded the tender; `<pid>-<lease>` is the hand-over id.
+coordinator gave the computer that downloaded the tender, `YYYYMMDD * 1000 + n` (for example
+`20261026002`), so a tender handed over again on another day gets another folder;
+`<pid>-<lease>` is the hand-over id. Both sides read the lease as a plain integer.
 
 ### The day's work list
 

@@ -8,7 +8,7 @@ import urllib.request
 import process_batch
 
 BASE = "root/LV"
-HANDOVER = "900001-2"
+HANDOVER = "900001-20261026002"
 INBOX = "%s/inbox/%s" % (BASE, HANDOVER)
 RECORD = "%s/published/%s.json" % (BASE, HANDOVER)
 TENDER = "%s/tenders/900001" % BASE
@@ -118,7 +118,7 @@ class Process(unittest.TestCase):
                                                  "outcome", "reason", "run_id", "tender_path",
                                                  "changes_path")},
                          {"schema": "tender-published/1", "country": "LV", "date": "2026-10-26",
-                          "pid": "900001", "lease": 2, "computer": "PC-A", "outcome": "published",
+                          "pid": "900001", "lease": 20261026002, "computer": "PC-A", "outcome": "published",
                           "reason": None, "run_id": "42", "tender_path": "tenders/900001/",
                           "changes_path": "tenders/900001/changes.json"})
         self.assertTrue(record["written_at"].endswith("Z"))
@@ -176,7 +176,7 @@ class Process(unittest.TestCase):
 
     def test_a_manifest_of_another_hand_over_is_incomplete(self):
         drive = Drive({INBOX + "/manifest.json":
-                       json.dumps(manifest(handover="900001-1")).encode()})
+                       json.dumps(manifest(handover="900001-20261026001")).encode()})
         self.assertEqual(self.run_it(drive), 2)
         self.assertEqual(drive.writes, [])
 
@@ -219,14 +219,14 @@ class Process(unittest.TestCase):
         self.run_it(drive)
         again = Drive(drive.files)
         for path, data in staged().files.items():
-            again.files[path.replace(HANDOVER, "900001-3")] = data
-        again.files["%s/inbox/900001-3/manifest.json" % BASE] = json.dumps(
-            manifest(handover="900001-3")).encode()
-        self.run_it(again, "900001-3")
+            again.files[path.replace(HANDOVER, "900001-20261026003")] = data
+        again.files["%s/inbox/900001-20261026003/manifest.json" % BASE] = json.dumps(
+            manifest(handover="900001-20261026003")).encode()
+        self.run_it(again, "900001-20261026003")
         self.assertFalse(any("/doc/" in w for w in again.writes))
         self.assertNotIn(TENDER + "/index.json", again.writes)
         self.assertEqual(again.read_json(TENDER + "/changes.json")["status"], "unchanged")
-        self.assertEqual(again.read_json("%s/published/900001-3.json" % BASE)["outcome"], "published")
+        self.assertEqual(again.read_json("%s/published/900001-20261026003.json" % BASE)["outcome"], "published")
 
 
 class PutBack(unittest.TestCase):
@@ -241,6 +241,14 @@ class Main(unittest.TestCase):
     def test_a_hand_over_id_is_a_number_and_a_lease(self):
         self.assertEqual(process_batch.main(["--handover-id", "LV-20261026-0001", "--country", "LV"]), 2)
         self.assertEqual(process_batch.main(["--handover-id", "../900001-2", "--country", "LV"]), 2)
+        self.assertEqual(process_batch.main(["--handover-id", "900001-0", "--country", "LV"]), 2)
+
+    def test_a_lease_of_the_coordinator_is_read_whole(self):
+        # The id of the run that failed on 1 Nov 2026: an eleven-digit lease, YYYYMMDD * 1000 + n.
+        for handover, parts in (("180227-20261101001", ("180227", "20261101001")),
+                                ("900001-20261231999", ("900001", "20261231999")),
+                                ("900001-2", ("900001", "2"))):
+            self.assertEqual(process_batch.HANDOVER_ID.match(handover).groups(), parts)
 
 
 class PackManifest(unittest.TestCase):
