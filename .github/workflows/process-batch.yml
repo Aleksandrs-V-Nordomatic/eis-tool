@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       handover_id:
-        description: "The hand-over to process, <pid>-<lease>, for example 900001-2"
+        description: "The hand-over to process, <pid>-<lease>, for example 900001-20261026002"
         required: true
 
 permissions:

@@ -12,6 +12,7 @@ import coordinator
 import download_batch
 import eis_fetch
 import harvest
+import process_batch
 import watchlist
 
 FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures")
@@ -63,6 +64,7 @@ class Coordinator:
         self.lose = set()
         self.listing_lost = False
         self.refuse_handover = set()
+        self.lease_base = 0
 
     def join(self):
         self.calls.append(("join",))
@@ -92,7 +94,8 @@ class Coordinator:
         for pid, t in sorted(self.tenders.items(), key=lambda kv: kv[1]["position"]):
             if t["state"] == "open" and t["attempts"] < 3:
                 t["state"], t["lease"] = "leased", t["lease"] + 1
-                return {"answer": "tender", "date": self.date, "pid": pid, "lease": t["lease"],
+                return {"answer": "tender", "date": self.date, "pid": pid,
+                        "lease": self.lease_base + t["lease"],
                         "position": t["position"], "watched": t["watched"]}
         return {"answer": "none", "date": self.date}
 
@@ -394,6 +397,14 @@ class Run(unittest.TestCase):
             self.assertTrue(ups[-1].endswith("/manifest.json"))
             self.assertTrue(all(u.endswith(".bin") for u in ups[:-1]))
         self.assertEqual(self.coordinator.made("handover"), [("handover", "100", 1), ("handover", "300", 1)])
+
+    def test_a_dated_lease_names_a_hand_over_the_workflow_reads(self):
+        self.coordinator.lease_base = 20261026000
+        self.dl.run()
+        self.assertEqual(self.coordinator.made("handover")[0], ("handover", "100", 20261026001))
+        self.assertEqual(self.manifest("100-20261026001")["lease"], 20261026001)
+        self.assertEqual(process_batch.HANDOVER_ID.match("100-20261026001").groups(),
+                         ("100", "20261026001"))
 
     def test_the_manifest_names_the_tender_the_computer_and_the_lease(self):
         self.dl.run()
