@@ -36,15 +36,26 @@ def looks_like_archive(path):
     return any(head.startswith(m) for m in MAGIC)
 
 
+def starts_like_archive(head):
+    """True when these first bytes are those of a ZIP, 7z or RAR archive."""
+    return any(head.startswith(m) for m in MAGIC)
+
+
 def members(path):
     """Paths of the files inside an archive, with `/` as separator."""
+    return [name for name, _ in sized_members(path)]
+
+
+def sized_members(path):
+    """Each file inside an archive as (path with `/` as separator, its unpacked size)."""
     if zipfile.is_zipfile(path):
         try:
             with zipfile.ZipFile(path) as z:
-                names = [_zip_name(info) for info in z.infolist() if not info.is_dir()]
+                found = [(_zip_name(info), info.file_size) for info in z.infolist()
+                         if not info.is_dir()]
         except (zipfile.BadZipFile, OSError) as exc:
             raise Unreadable(str(exc))
-        return [n for n in names if n]
+        return [(n, size) for n, size in found if n]
     binary = seven_zip()
     if not binary:
         raise Unreadable("7-Zip is not installed")
@@ -52,24 +63,70 @@ def members(path):
                           capture_output=True, timeout=600, creationflags=NO_WINDOW)
     if proc.returncode != 0:
         raise Unreadable(proc.stderr.decode("utf-8", "replace")[:200] or "7-Zip failed")
-    return listed_files(proc.stdout.decode("utf-8", "replace"))
+    return listed_sizes(proc.stdout.decode("utf-8", "replace"))
 
 
 def listed_files(listing):
-    """The file paths of a `7z l -slt` listing. A folder is marked `Folder = +` in ZIP and RAR
-    archives, but only by the D of its attributes in 7z ones; extracting a folder would pour
-    all its files into one."""
+    """The file paths of a `7z l -slt` listing."""
+    return [name for name, _ in listed_sizes(listing)]
+
+
+def listed_sizes(listing):
+    """The files of a `7z l -slt` listing as (path, size). A folder is marked `Folder = +` in ZIP
+    and RAR archives, but only by the D of its attributes in 7z ones; extracting a folder would
+    pour all its files into one."""
     out, current = [], {}
     for line in listing.splitlines() + [""]:
         if not line.strip():
             attributes = current.get("Attributes", "").split(" ")[0]
             if current.get("Path") and current.get("Folder") != "+" and "D" not in attributes:
-                out.append(current["Path"].replace("\\", "/"))
+                size = current.get("Size", "")
+                out.append((current["Path"].replace("\\", "/"), int(size) if size.isdigit() else 0))
             current = {}
             continue
         key, _, value = line.partition(" = ")
         current[key.strip()] = value
     return out
+
+
+def member_chunks(path, member, size=2 ** 20):
+    """One member of an archive on disk as it is unpacked, written nowhere."""
+    if not eis_fetch.safe_member(member):
+        raise Unreadable("unsafe member path %r" % member)
+    if zipfile.is_zipfile(path):
+        with zipfile.ZipFile(path) as z:
+            info = next((i for i in z.infolist() if _zip_name(i) == member), None)
+            if info is None:
+                raise Unreadable("no member %r" % member)
+            with z.open(info) as src:
+                while True:
+                    chunk = src.read(size)
+                    if not chunk:
+                        return
+                    yield chunk
+    binary = seven_zip()
+    if not binary:
+        raise Unreadable("7-Zip is not installed")
+    proc = subprocess.Popen([binary, "e", "-so", "-sccUTF-8", path, member],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            creationflags=NO_WINDOW)
+    finished = False
+    try:
+        while True:
+            chunk = proc.stdout.read(size)
+            if not chunk:
+                break
+            yield chunk
+        finished = True
+    finally:
+        if not finished:
+            proc.kill()
+        proc.stdout.close()
+        error = proc.stderr.read()
+        proc.stderr.close()
+        proc.wait()
+    if proc.returncode != 0:
+        raise Unreadable(error.decode("utf-8", "replace")[:200] or "7-Zip failed")
 
 
 def _zip_name(info):

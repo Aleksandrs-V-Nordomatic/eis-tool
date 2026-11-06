@@ -46,7 +46,8 @@ class Incomplete(Exception):
 
 
 def check(drive, inbox, manifest, work):
-    """Download every kept file of the tender and compare it with the manifest."""
+    """Download every kept file of the tender and compare it with the manifest. A file carried
+    away during an earlier attempt of the day is in that attempt's folder, beside this one."""
     tender = manifest["tender"]
     folder = os.path.join(work, tender["pid"], "documents", "actual")
     os.makedirs(folder, exist_ok=True)
@@ -54,7 +55,10 @@ def check(drive, inbox, manifest, work):
         if f["decision"] != "download":
             continue
         local = os.path.join(folder, f["stored"].split("/", 1)[1])
-        if not drive.download("%s/%s" % (inbox, f.get("inbox") or f["stored"]), local):
+        home = inbox
+        if f.get("carried_under"):
+            home = "%s/%s" % (inbox.rsplit("/", 1)[0], f["carried_under"])
+        if not drive.download("%s/%s" % (home, f.get("inbox") or f["stored"]), local):
             raise Incomplete("a kept file is missing")
         if os.path.getsize(local) != f["size"] or eis_fetch.sha256_file(local) != f["sha256"]:
             raise Incomplete("a kept file differs from the manifest")
@@ -240,6 +244,9 @@ def process(drive, base, handover_id, run_id, work, client=None):
         "tender_path": "tenders/%s/" % pid,
         "changes_path": "tenders/%s/changes.json" % pid if moved else None},
         ensure_ascii=False).encode("utf-8"))
+    for other in manifest.get("inboxes", []):
+        if other != handover_id:
+            drive.delete("%s/inbox/%s" % (base, other))
     drive.delete(inbox)
     say("tender %s %s%s" % (pid, outcome, " (%s)" % moved["status"] if moved else
                             ": %s" % reason.split(":", 1)[0]))
