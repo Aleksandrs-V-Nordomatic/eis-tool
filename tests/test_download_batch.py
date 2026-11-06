@@ -29,6 +29,9 @@ class Library:
         self.uploads = []
         self.unsynced = set()
         self.late = {}          # path: how many reads before the sync client brings it
+        self.freed = []
+        self.stay_local = set()
+        self.folder_held = 0
 
     def read_text(self, path):
         if self.late.get(path):
@@ -47,8 +50,23 @@ class Library:
         self.uploads.append(path)
         return len(self.files[path])
 
+    def move_in(self, path, local):
+        size = self.upload(path, local)
+        os.remove(local)
+        return size
+
     def not_in_sync(self, paths):
         return [p for p in paths if p not in self.files or p in self.unsynced]
+
+    def let_go(self, paths):
+        self.freed += list(paths)
+        return [p for p in paths if p in self.stay_local]
+
+    def let_go_of_folder(self, path):
+        return self.folder_held
+
+    def bytes_held(self, path):
+        return 0
 
 
 class Coordinator:
@@ -141,6 +159,8 @@ class FakeTender:
     offline = {}
     broken_files = {}
     slow_files = {}
+    file_sizes = {}
+    extra_files = []
     withdrawn = set()
     downloads = []
     uuids = []
@@ -174,7 +194,7 @@ class FakeTender:
     def list_files(self, record):
         if record["id"] == 1:
             return [{"file_id": 11, "name": "Nolikums.docx", "type_code": None},
-                    {"file_id": 12, "name": "Pieteikuma veidlapa.docx", "type_code": None}]
+                    {"file_id": 12, "name": "Pieteikuma veidlapa.docx", "type_code": None}] + FakeTender.extra_files
         return [{"file_id": 21, "name": "Projekts.zip", "type_code": None}]
 
     def download_file(self, record, file_id, dest):
@@ -194,10 +214,22 @@ class FakeTender:
                             "Pielikumi.zip": nested})
         else:
             with open(dest, "wb") as fh:
-                fh.write(b"file %d" % file_id)
+                fh.write(b"x" * FakeTender.file_sizes[file_id] if file_id in FakeTender.file_sizes
+                         else b"file %d" % file_id)
         return os.path.getsize(dest)
 
-    def download_record_zip(self, record, dest):
+    def stream_file(self, record, file_id):
+        folder = tempfile.mkdtemp()
+        try:
+            dest = os.path.join(folder, "file")
+            announced = self.download_file(record, file_id, dest)
+            with open(dest, "rb") as fh:
+                data = fh.read()
+        finally:
+            shutil.rmtree(folder)
+        return announced, iter([data[i:i + 5] for i in range(0, len(data), 5)])
+
+    def stream_record_zip(self, record):
         raise AssertionError("not expected")
 
 
@@ -248,6 +280,8 @@ class Run(unittest.TestCase):
         FakeTender.offline = {}
         FakeTender.broken_files = {}
         FakeTender.slow_files = {}
+        FakeTender.file_sizes = {}
+        FakeTender.extra_files = []
         FakeTender.withdrawn = set()
         FakeTender.downloads = []
         FakeTender.uuids = []
@@ -449,20 +483,41 @@ class Run(unittest.TestCase):
         self.assertFalse(any(n.endswith("Pielikumi.zip") for n in uploaded))
         self.assertTrue(any(n.endswith("Darba_uzdevums.docx") or n.endswith("Darba uzdevums.docx") for n in uploaded))
 
-    def test_each_archive_is_unpacked_in_one_pass_over_its_kept_members(self):
-        passes, real = [], download_batch.archives.extract_many
+    def test_a_zip_is_sorted_from_the_download_and_never_stored(self):
+        written = []
+        real = self.dl.write
 
-        def recorded(path, picks):
-            passes.append((os.path.basename(path), [member for member, _ in picks]))
-            real(path, picks)
+        def write(job, target, chunks):
+            written.append(os.path.basename(target))
+            real(job, target, chunks)
 
-        self.patch(download_batch.archives, "extract_many", recorded)
+        self.dl.write = write
         self.dl.run()
-        first = [p for p in passes if p[0].endswith("Projekts.zip")]
-        inner = [p for p in passes if p[0].endswith("Pielikumi.zip")]
-        self.assertEqual(len(first), 2)  # one pass for each of the two tenders
-        self.assertEqual(first[0][1], ["Teksts/Tehniska specifikacija.pdf", "Pielikumi.zip"])
-        self.assertEqual(inner[0][1], ["Darba uzdevums.docx"])
+        self.assertTrue(written)
+        self.assertFalse([n for n in written if n.endswith(".zip")])
+        archive = next(f for f in self.manifest("100-1")["tender"]["files"] if f["name"] == "Projekts.zip")
+        self.assertEqual(archive["decision"], "unpacked")
+        self.assertTrue(archive["size"] and archive["sha256"])
+
+    def test_a_zip_that_cannot_be_read_as_it_arrives_is_taken_to_disk(self):
+        def refused(chunks):
+            raise download_batch.zip_stream.NotStreamable("compression method 9")
+            yield
+
+        self.patch(download_batch.zip_stream, "members", refused)
+        self.dl.run()
+        files = self.manifest("100-1")["tender"]["files"]
+        spec = next(f for f in files if f["name"] == "Tehniska specifikacija.pdf")
+        self.assertEqual(spec["decision"], "download")
+        self.assertEqual(self.library.files["%s/inbox/100-1/%s" % (WORK, spec["inbox"])], b"spec")
+        self.assertEqual(next(f for f in files if f["name"] == "Projekts.zip")["decision"], "unpacked")
+        self.assertEqual(os.listdir(os.path.join(self.root, "100")), ["state.json"])
+
+    def test_a_portal_that_keeps_breaking_off_spends_an_attempt(self):
+        FakeTender.offline = {"300": 99}
+        results = self.dl.run()
+        self.assertEqual(results[:2], [("100", "handed over"), ("300", "attempt failed")])
+        self.assertEqual(self.coordinator.tenders["300"]["attempts"], 3)
 
     def test_a_withdrawn_tender_is_handed_over_without_files(self):
         FakeTender.withdrawn = {"300"}
@@ -487,14 +542,14 @@ class Run(unittest.TestCase):
         self.assertIn("%s/inbox/100-2/manifest.json" % WORK, self.library.files)
 
     def test_every_kept_file_is_waited_for(self):
-        real = self.library.upload
+        real = self.library.move_in
 
-        def upload(path, local, replace=False):
-            if "/inbox/100-1/" in path and path.endswith(".bin") and not self.library.unsynced:
+        def move_in(path, local):
+            if "/inbox/100-1/" in path and not self.library.unsynced:
                 self.library.unsynced.add(path)
-            return real(path, local, replace)
+            return real(path, local)
 
-        self.library.upload = upload
+        self.library.move_in = move_in
         self.assertEqual(self.dl.run(), [("100", "interrupted")])
         self.assertEqual(self.coordinator.made("handover"), [])
 
@@ -575,52 +630,193 @@ class Run(unittest.TestCase):
         self.assertEqual(results[:2], [("100", "attempt failed"), ("100", "handed over")])
         self.assertEqual([d for d in FakeTender.downloads if d[0] == "100"], [("100", 11), ("100", 21)])
 
-    def test_a_downloaded_archive_and_its_unpacked_members_are_taken_from_disk(self):
-        extracted, real = [], download_batch.archives.extract
+    def test_files_carried_in_an_earlier_attempt_are_not_taken_again(self):
+        self.patch(download_batch, "HOLD_LIMIT", 20_000)
+        FakeTender.file_sizes = {11: 15_000, 13: 15_000}
+        FakeTender.extra_files = [{"file_id": 13, "name": "Nolikums 2.docx", "type_code": None}]
+        FakeTender.broken_files = {("100", 21): 1}
+        results = self.dl.run()
+        self.assertEqual(results[:2], [("100", "attempt failed"), ("100", "handed over")])
+        self.assertEqual([d for d in FakeTender.downloads if d[0] == "100"],
+                         [("100", 11), ("100", 13), ("100", 21)])
 
-        def stopped_after_one(path, member, dest):
-            if extracted:
+    def test_a_member_kept_before_the_stop_is_not_written_again(self):
+        real, stops = self.dl.write, []
+
+        def stopped_once(job, target, chunks):
+            if "Darba" in target and not stops:
+                stops.append(target)
                 raise KeyboardInterrupt("the laptop went to sleep")
-            extracted.append(member)
-            real(path, member, dest)
+            real(job, target, chunks)
 
-        self.patch(download_batch.archives, "extract", stopped_after_one)
+        self.dl.write = stopped_once
         with self.assertRaises(KeyboardInterrupt):
             self.dl.run()
         self.coordinator.tenders["100"]["state"] = "open"     # the lease lapsed
-        FakeTender.downloads, calls = [], []
-        self.patch(download_batch.archives, "extract",
-                   lambda path, member, dest: (calls.append((path, member)), real(path, member, dest)))
+        written = []
+
+        def recorded(job, target, chunks):
+            written.append(target)
+            real(job, target, chunks)
+
+        self.dl.write = recorded
         self.dl.run()
-        self.assertNotIn(("100", 21), FakeTender.downloads)
-        first_tender = [m for path, m in calls if os.sep + "100" + os.sep in path]
-        self.assertNotIn(extracted[0], first_tender)
+        first_tender = [t for t in written if os.sep + "100" + os.sep in t]
+        self.assertTrue(any("Darba" in t for t in first_tender))
+        self.assertFalse(any("Tehniska" in t for t in first_tender))
         names = sorted(f["name"] for f in self.manifest("100-2")["tender"]["files"] if f.get("stored"))
         self.assertIn("Tehniska specifikacija.pdf", names)
         self.assertIn("Darba uzdevums.docx", names)
 
-    def test_a_folder_left_by_another_day_is_emptied_first(self):
-        home = os.path.join(self.root, "300")
+    # ------------------------------------------------------------ the limit on this computer
+    def peak(self):
+        """Watches what the tender folders hold each time a file is written."""
+        peaks = []
+        real = self.dl.write
+
+        def write(job, target, chunks):
+            real(job, target, chunks)
+            peaks.append(self.dl.tenders_bytes())
+
+        self.dl.write = write
+        return peaks
+
+    def test_kept_files_are_carried_away_when_the_room_runs_out(self):
+        self.patch(download_batch, "HOLD_LIMIT", 20_000)
+        FakeTender.file_sizes = {11: 15_000, 13: 15_000}
+        FakeTender.extra_files = [{"file_id": 13, "name": "Nolikums 2.docx", "type_code": None}]
+        self.opened_by_another_computer((("100", False),))
+        peaks = self.peak()
+        real_handover = self.coordinator.handover
+        carried_before = []
+
+        def handover(date, pid, lease):
+            carried_before.append(len(self.library.freed))
+            return real_handover(date, pid, lease)
+
+        self.coordinator.handover = handover
+        moved_at = []
+        real_write = self.dl.write
+
+        def write(job, target, chunks):
+            real_write(job, target, chunks)
+            moved_at.append((os.path.basename(target), len(self.library.uploads)))
+
+        self.dl.write = write
+        self.assertEqual(self.dl.run(), [("100", "handed over")])
+        self.assertLessEqual(max(peaks), 20_000)
+        second = next(n for name, n in moved_at if name.endswith("Nolikums_2.docx") or "Nolikums 2" in name)
+        self.assertGreaterEqual(second, 1)   # the first was on its way before the second was whole
+        self.assertTrue(carried_before[0])
+
+    def test_nothing_of_a_tender_stays_here_once_it_is_handed_over(self):
+        self.dl.run()
+        self.assertEqual(os.listdir(os.path.join(self.root, "100")), ["state.json"])
+        self.assertEqual(download_batch.load_json(os.path.join(self.root, "100", "state.json"))["status"],
+                         "handed over")
+
+    def test_every_carried_file_and_the_manifest_are_freed_before_the_hand_over(self):
+        seen = []
+        real = self.coordinator.handover
+
+        def handover(date, pid, lease):
+            seen.append(list(self.library.freed))
+            return real(date, pid, lease)
+
+        self.coordinator.handover = handover
+        self.dl.run()
+        first = seen[0]
+        self.assertIn("%s/inbox/100-1/manifest.json" % WORK, first)
+        for f in self.manifest("100-1")["tender"]["files"]:
+            if f["decision"] == "download":
+                self.assertIn("%s/inbox/100-1/%s" % (WORK, f["inbox"]), first)
+
+    def test_a_file_that_cannot_fit_is_left_out_and_named(self):
+        self.patch(download_batch, "HOLD_LIMIT", 20_000)
+        FakeTender.file_sizes = {11: 30_000}
+        self.opened_by_another_computer((("100", False),))
+        self.assertEqual(self.dl.run(), [("100", "handed over")])
+        files = self.manifest("100-1")["tender"]["files"]
+        regulations = next(f for f in files if f["name"] == "Nolikums.docx")
+        self.assertEqual(regulations["decision"], "skip")
+        self.assertIn("may hold", regulations["reason"])
+        self.assertFalse([p for p in self.library.files if "Nolikums" in p])
+        self.assertEqual(os.listdir(os.path.join(self.root, "100")), ["state.json"])
+
+    def test_a_file_that_is_not_freed_gives_the_tender_back(self):
+        self.patch(download_batch, "LET_GO_WAIT", 0)
+        self.library.stay_local = {"%s/inbox/100-1/100/%s" % (WORK, n) for n in ("000_Nolikums.docx.bin",)}
+        self.assertEqual(self.dl.run()[0], ("100", "interrupted"))
+        self.assertEqual(self.coordinator.made("handover"), [])
+
+    def test_files_of_an_earlier_attempt_are_named_by_the_attempt_that_carried_them(self):
+        self.library.unsynced = {"%s/inbox/100-1/manifest.json" % WORK}
+        self.dl.run()
+        self.library.unsynced = set()
+        self.dl.run()
+        manifest = self.manifest("100-2")
+        self.assertEqual(manifest["inboxes"], ["100-1", "100-2"])
+        kept = [f for f in manifest["tender"]["files"] if f["decision"] == "download"]
+        self.assertEqual({f["carried_under"] for f in kept}, {"100-1"})
+        for f in kept:
+            self.assertIn("%s/inbox/100-1/%s" % (WORK, f["inbox"]), self.library.files)
+
+    def test_a_run_over_the_limit_takes_no_tender(self):
+        self.patch(download_batch, "SETTLE_WAIT", 0)
+        self.library.folder_held = download_batch.HOLD_LIMIT + 1
+        self.assertEqual(self.dl.run(), [])
+        self.assertEqual(self.coordinator.made("take"), [])
+
+    def test_a_tender_of_another_day_is_emptied_at_the_start(self):
+        home = os.path.join(self.root, "555")
         os.makedirs(os.path.join(home, "files"))
         with open(os.path.join(home, "files", "000_old.pdf"), "wb") as fh:
             fh.write(b"yesterday")
-        download_batch.save_json(os.path.join(home, "selection.json"), {"pid": "300", "files": [],
-                                                                        "records": []})
         download_batch.save_json(os.path.join(home, "state.json"),
-                                 {"pid": "300", "date": "2026-10-25", "status": "handed over"})
-        self.dl.run()
-        self.assertFalse(os.path.exists(os.path.join(home, "files", "000_old.pdf")))
-        self.assertTrue(self.manifest("300-1")["tender"]["files"])
-
-    def test_a_published_tender_gives_its_disk_space_back(self):
-        self.dl.run()
-        home = os.path.join(self.root, "100")
-        self.assertTrue(os.path.isdir(os.path.join(home, "files")))
-        self.library.files[WORK + "/published/100-1.json"] = json.dumps({"pid": "100"})
+                                 {"pid": "555", "date": "2026-10-25", "status": "downloading"})
         self.dl.run()
         self.assertEqual(os.listdir(home), ["state.json"])
-        self.assertEqual(download_batch.load_json(os.path.join(home, "state.json"))["status"], "published")
-        self.assertTrue(os.path.isdir(os.path.join(self.root, "300", "files")))
+
+    def test_an_archive_that_must_be_on_disk_is_unpacked_in_passes_inside_the_limit(self):
+        self.patch(download_batch, "HOLD_LIMIT", 30_000)
+        real = FakeTender.list_files
+        self.patch(FakeTender, "list_files", lambda page, record: (
+            [{"file_id": 31, "name": "Projekts.7z", "type_code": None}] if record["id"] == 2
+            else real(page, record)))
+        real_file = FakeTender.download_file
+
+        def archive(page, record, file_id, dest):
+            if file_id != 31:
+                return real_file(page, record, file_id, dest)
+            with open(dest, "wb") as fh:
+                fh.write(b"7z\xbc\xaf\x27\x1c" + b"x" * 9_994)
+            return 10_000
+
+        self.patch(FakeTender, "download_file", archive)
+        listed = [("a/Tehniska specifikacija %d.pdf" % n, 8_000) for n in range(4)]
+        self.patch(download_batch.archives, "sized_members", lambda path: listed)
+        passes = []
+        held_after = []
+
+        def extract_many(path, picks):
+            passes.append([member for member, _ in picks])
+            self.assertTrue(os.path.exists(path))
+            for _, dest in picks:
+                with open(dest, "wb") as fh:
+                    fh.write(b"s" * 8_000)
+            held_after.append(self.dl.tenders_bytes())
+
+        self.patch(download_batch.archives, "extract_many", extract_many)
+        self.opened_by_another_computer((("100", False),))
+        self.assertEqual(self.dl.run(), [("100", "handed over")])
+        self.assertGreaterEqual(len(passes), 2)
+        self.assertLessEqual(max(held_after), 30_000)
+        self.assertEqual(sum(len(p) for p in passes), 4)
+        files = self.manifest("100-1")["tender"]["files"]
+        self.assertEqual(next(f for f in files if f["name"] == "Projekts.7z")["decision"], "unpacked")
+        kept = [f for f in files if f["decision"] == "download" and f["archive"]]
+        self.assertEqual(len(kept), 4)
+        self.assertEqual(os.listdir(os.path.join(self.root, "100")), ["state.json"])
 
 
 class HeartbeatTest(unittest.TestCase):

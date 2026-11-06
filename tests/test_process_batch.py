@@ -110,6 +110,27 @@ class Process(unittest.TestCase):
         self.assertFalse(any(k.startswith(INBOX) for k in drive.files))
         self.assertEqual(self.coordinator.put_backs, [])
 
+    def test_a_file_carried_away_by_an_earlier_attempt_is_read_from_that_attempts_folder(self):
+        text = b"Nolikuma teksts\n"
+        earlier = BASE + "/inbox/900001-20261026001"
+        document = manifest(text)
+        document["inboxes"] = ["900001-20261026001", HANDOVER]
+        document["tender"]["files"][0]["carried_under"] = "900001-20261026001"
+        drive = Drive({INBOX + "/manifest.json": json.dumps(document).encode(),
+                       earlier + "/900001/000_Nolikums.txt.bin": text})
+        self.assertEqual(self.run_it(drive), 0)
+        self.assertEqual(self.coordinator.put_backs, [])
+        self.assertFalse(any(k.startswith(earlier) or k.startswith(INBOX) for k in drive.files))
+        self.assertEqual(drive.writes[-3:], [RECORD, "DELETE " + earlier, "DELETE " + INBOX])
+
+    def test_a_carried_file_that_is_not_in_its_folder_puts_the_tender_back(self):
+        document = manifest()
+        document["tender"]["files"][0]["carried_under"] = "900001-20261026001"
+        drive = Drive({INBOX + "/manifest.json": json.dumps(document).encode(),
+                       INBOX + "/900001/000_Nolikums.txt.bin": b"Nolikuma teksts\n"})
+        self.assertEqual(self.run_it(drive), 2)
+        self.assertEqual(len(self.coordinator.put_backs), 1)
+
     def test_the_publication_record_names_the_outcome_the_computer_and_the_lease(self):
         drive = staged()
         self.run_it(drive)

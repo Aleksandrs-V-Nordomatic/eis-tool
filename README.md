@@ -113,17 +113,27 @@ live (`coordinator.LeaseLost`). `coordinator.py` is the client.
 | Check everything a run needs and stop, naming what is missing: settings, the kit in the synced folder, both credentials (by name), tzdata, 7-Zip, curl, the scheduled task, OneDrive running, the code at `origin/master` without local changes | `download_batch.doctor` |
 | Lock, so one run works at a time on the computer; the lock names its process by id and start time, so a dead run's lock is taken over at once | `download_batch.Lock` |
 | Read the three kit files from the library folder OneDrive syncs to the computer | `synced.py` |
-| Empty the folder of every tender whose publication record is in the library; only its `state.json` stays | `Downloader.free_space` |
 | Join the day; wait while another computer lists it | `Downloader.join` |
+| Empty the folder of every tender handed over and of every tender of another day; only its `state.json` stays | `Downloader.free_space` |
+| Ask OneDrive to free the project's `work` folder; a run over the limit after 30 minutes takes no tender | `Downloader.settle_disk`, `synced.Library.let_go_of_folder` |
 | List the day under the listing lease: window from the newest `days/*.json`, notices of the window, the recall gate, the watch list; write `days/<date>.json`, then open the day | `Downloader.list_day`, `harvest.py`, `policy.py`, `watchlist.py` |
 | Take tenders one at a time until none is left | `Downloader.run` |
 | Wait for the sync client to bring the day's work list when another computer wrote it | `Downloader.wait_for_day` |
 | Confirm the lease every 3 minutes on a background thread | `download_batch.Heartbeat` |
 | Read the page, list the files of each current record, decide each file, download the kept ones (`.part`, size check, sha256) into `C:\radar\tenders\<pid>\` | `eis_fetch.Tender`, `selection.py`, `Downloader.download` |
-| An archive with skipped members: its kept members travel on their own, unpacked in one pass over the archive | `archives.py` |
-| Copy the kept files, then `manifest.json`, into `inbox/<pid>-<lease>/` in the synced library folder | `Downloader.copy` |
+| A ZIP is sorted as it arrives and is never stored; its kept members travel on their own | `zip_stream.py`, `Downloader.sort_stream` |
+| Any other archive comes to disk, its kept members come out in passes that fit in the limit, and it is deleted | `archives.py`, `Downloader.sort_disk` |
+| When the room runs out, and at the end of the tender: move the kept files into `inbox/<pid>-<lease>/` in the synced library folder | `Downloader.carry` |
 | Wait until OneDrive shows every one of them as an in-sync placeholder, up to two hours | `Downloader.wait_for_sync`, `synced.Library.not_in_sync` |
-| Hand the tender over to the coordinator, or give it back | `Downloader.hand_over`, `Downloader.release` |
+| Ask OneDrive to free them, and wait until only the placeholders are left | `Downloader.wait_for_let_go`, `synced.Library.let_go` |
+| Copy `manifest.json` in last; hand the tender over to the coordinator, or give it back; empty its folder | `Downloader.hand_over`, `Downloader.release` |
+
+The radar holds at most 1 GB on a computer, at every moment: the tender folders, the staging
+folder and the rest of the project's `work` folder (`DISK_LIMIT`). The count runs before each
+write. EIS serves no byte ranges and some archives are larger than the limit, which is why a ZIP
+is sorted from the download itself; a ZIP this cannot follow (encryption, Deflate64) comes to disk instead. A file that does not fit even with everything else
+carried away, and a 7z or RAR larger than the limit, is left out: it is `skip` in the manifest
+with the reason, in the log and in a Windows notification, and the tender goes on without it.
 
 The lease is checked before each file. A lease that lapsed (the computer slept, or the network
 was gone for 20 minutes) stops the tender there with no release, and the run takes the next one.
@@ -133,7 +143,9 @@ finish) is not a failure: the run waits up to two hours for the network and goes
 same tender, or releases it as `interrupted` and ends. Each tender's `selection.json` is saved
 after every file, and a downloaded file or unpacked member is renamed into place only once
 whole, so a tender given again the same day starts at the first unfinished file; a folder left
-by another day is emptied first. Records of the archive section (replaced versions) are listed
+by another day is emptied first. A file carried away stays in the staging folder of the attempt
+that carried it, and the manifest names that folder (`carried_under`, `inboxes`). Records of the
+archive section (replaced versions) are listed
 by title and not opened. Windows notifications report a tender that failed for good and the end
 of a run. The log is `C:\radar\tenders\logs\downloader.log`, rotated at 1 MB with three earlier
 files kept; a line repeated at once is counted, not written again, and the log names tenders by

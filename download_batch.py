@@ -8,10 +8,14 @@ day: the notices published since the newest day's work list's window that pass t
 gate, plus the tenders on the watch list. It writes the day's work list into the library and
 gives the tenders to the coordinator. Every computer then takes tenders one at a time:
 selects and downloads one tender's documents into its own folder, confirms its lease while it
-works, copies the kept files and then the manifest into the staging folder of the library as
-the sync client keeps it on this computer, waits until every file is carried to SharePoint and
-hands the tender over. The coordinator starts the processing workflow. It converts, judges and
-publishes nothing.
+works, moves the kept files and then the manifest into the staging folder of the library as
+the sync client keeps it on this computer, waits until every file is carried to SharePoint,
+lets the local bytes go and hands the tender over. The coordinator starts the processing
+workflow. It converts, judges and publishes nothing.
+
+The radar holds at most DISK_LIMIT on this computer, at every moment: kept files are carried
+away as soon as the room runs out, a ZIP is sorted from the download without being stored, and a
+file that still cannot fit is left out and named in the manifest.
 
     python download_batch.py --doctor      check what a run needs, and stop
 
@@ -23,6 +27,7 @@ person's monday.com token) and `coordinator` (this computer's Cloudflare Access 
 
 import argparse
 import datetime as dt
+import hashlib
 import json
 import os
 import re
@@ -42,6 +47,7 @@ import policy
 import selection
 import synced
 import watchlist
+import zip_stream
 
 SETTINGS = os.path.join(os.path.expanduser("~"), ".eis-tool", "downloader.json")
 SETTINGS_KEYS = ("country", "library_root", "library_project", "kit", "tenders", "coordinator_url")
@@ -61,6 +67,9 @@ MAX_NESTING = 3
 # how often it looks. Neither the wait nor the give-back spends one of the tender's attempts.
 NETWORK_WAIT = 2 * 3600
 NETWORK_PAUSE = 30
+# A transfer may break off this many times in a row, with the network up and nothing gained, before
+# it spends an attempt.
+MAX_BROKEN_OFF = 10
 # The lease is confirmed this often while the computer works on a tender or lists the day; the
 # coordinator lets a lease lapse after 20 minutes without a confirmation.
 CONFIRM_EVERY = 180
@@ -68,8 +77,18 @@ CONFIRM_EVERY = 180
 # and how long it waits for another computer to open the day.
 DAY_WAIT = 2 * 3600
 DAY_PAUSE = 60
-# What a tender's folder keeps once the library holds its publication record.
-KEPT_AFTER_PUBLISHED = ("state.json",)
+# All the radar may hold on this computer. HOLD_LIMIT is what is left of it for tenders once the
+# program, its logs and the kit have their place.
+DISK_LIMIT = 10 ** 9
+HOLD_LIMIT = DISK_LIMIT - 100 * 10 ** 6
+# How long a carried file may take to leave this computer, and how often it is looked at.
+LET_GO_WAIT = 30 * 60
+LET_GO_PAUSE = 5
+# How long a run waits at its start for the library folder to fall under the limit.
+SETTLE_WAIT = 30 * 60
+SETTLE_PAUSE = 30
+# What a tender's folder keeps once its files are in the library.
+KEPT_AFTER_HANDOVER = ("state.json",)
 
 
 def riga():
@@ -434,6 +453,67 @@ class FilesFailed(Exception):
     """One or more selected files could not be downloaded in this attempt."""
 
 
+class TooBig(Exception):
+    """The file does not fit in what this computer may hold, even with everything else gone."""
+
+
+class CarryFailed(Exception):
+    """The sync client did not carry the files away in time."""
+
+
+class Tally:
+    """Chunks passing through, counted and hashed. The first one can be looked at beforehand."""
+
+    def __init__(self, chunks):
+        self.chunks = iter(chunks)
+        self.size = 0
+        self.hash = hashlib.sha256()
+        self.head = None
+        self.head_passed = False
+
+    def first(self):
+        if self.head is None:
+            self.head = next(self.chunks, b"")
+        return self.head
+
+    def __iter__(self):
+        first = self.first()
+        chunk = next(self.chunks, b"") if self.head_passed else first
+        self.head_passed = True
+        while chunk:
+            self.size += len(chunk)
+            self.hash.update(chunk)
+            yield chunk
+            chunk = next(self.chunks, b"")
+
+    def drain(self):
+        for _ in self:
+            pass
+
+    def close(self):
+        close = getattr(self.chunks, "close", None)
+        if close:
+            close()
+
+
+class Job:
+    """The tender this computer is working on."""
+
+    def __init__(self, pid, home, handover_id, beat):
+        self.pid = pid
+        self.home = home
+        self.handover_id = handover_id
+        self.beat = beat
+        self.selected = None
+
+    def file(self, slot):
+        return os.path.join(self.home, "files", slot)
+
+    @property
+    def ledger(self):
+        return self.selected.setdefault("ledger", {})
+
+
 # --------------------------------------------------------------------------- the run
 class Downloader:
     def __init__(self, settings, library, client, monday_token=None, computer=None):
@@ -447,6 +527,7 @@ class Downloader:
         self.coordinator = client
         self.monday_token = monday_token
         self.computer = computer
+        self.held = 0
         self.version = None
         self.log = print
 
@@ -626,34 +707,123 @@ class Downloader:
     def save_state(self, pid, state):
         save_json(os.path.join(self.home(pid), "state.json"), state)
 
-    def free_space(self):
-        """Empty the folder of every tender whose publication record is in the library; only
-        its state stays. Until the record is there the files stay, because the workflow may put
-        the tender back and this computer may be given it again."""
+    def clear(self, pid):
+        """Empty a tender's folder; only its state stays."""
+        home, freed = self.home(pid), 0
+        for name in os.listdir(home):
+            if name in KEPT_AFTER_HANDOVER:
+                continue
+            path = archives.long_path(os.path.join(home, name))
+            if os.path.isdir(path):
+                for root, _, files in os.walk(path):
+                    freed += sum(os.path.getsize(os.path.join(root, f)) for f in files)
+                shutil.rmtree(path)
+            else:
+                freed += os.path.getsize(path)
+                os.remove(path)
+        return freed
+
+    def free_space(self, date):
+        """Empty the folder of every tender handed over, and of every tender of another day."""
         if not os.path.isdir(self.root):
             return
-        published = set(self.library.list_names(self.work + "/published"))
         for pid in sorted(os.listdir(self.root)):
             state = load_json(os.path.join(self.root, pid, "state.json"))
-            if not state or state.get("status") != "handed over":
+            if not state:
                 continue
-            if "%s.json" % state.get("handover_id") not in published:
+            if state.get("status") in ("handed over", "superseded", "published") \
+                    or state.get("date") != date:
+                freed = self.clear(pid)
+                if freed:
+                    self.log("%s: freed %d MB" % (pid, freed // 2 ** 20))
+
+    def tenders_bytes(self):
+        """What the tender folders hold on this computer. The logs are the program's own: they
+        rotate at a fixed size."""
+        held = 0
+        for root, folders, files in os.walk(archives.long_path(self.root)):
+            if "logs" in folders:
+                folders.remove("logs")
+            for name in files:
+                try:
+                    held += os.path.getsize(os.path.join(root, name))
+                except OSError:
+                    pass
+        return held
+
+    def measure(self):
+        """Count what the radar holds now: the tender folders and the staging folder."""
+        self.held = self.tenders_bytes() + self.library.bytes_held(self.work + "/inbox")
+        return self.held
+
+    def settle_disk(self):
+        """Bring the radar under its limit before anything is downloaded. False if it stays above
+        it: a run does not start over the limit, it waits for the next one."""
+        deadline = time.monotonic() + SETTLE_WAIT
+        while True:
+            held = self.library.let_go_of_folder(self.project + "/work") + self.tenders_bytes()
+            if held <= HOLD_LIMIT:
+                self.log("the radar holds %d MB on this computer" % (held // 2 ** 20))
+                return True
+            if time.monotonic() >= deadline:
+                self.log("the radar still holds %d MB on this computer; nothing is downloaded "
+                         "until it falls under the limit" % (held // 2 ** 20))
+                notify("Tender download waits",
+                       "The radar holds %d MB, over its limit; the sync client has not freed it."
+                       % (held // 2 ** 20))
+                return False
+            time.sleep(SETTLE_PAUSE)
+
+    def make_room(self, job, need):
+        """Room for `need` more bytes, carrying the kept files away when it has run out."""
+        if self.held + need <= HOLD_LIMIT:
+            return
+        self.carry(job)
+        if self.measure() + need <= HOLD_LIMIT:
+            return
+        # Files of a tender not being worked on are left only to be taken up again; it can be
+        # downloaded once more.
+        for pid in os.listdir(self.root):
+            if pid != job.pid and os.path.exists(os.path.join(self.root, pid, "state.json")):
+                self.clear(pid)
+        if self.measure() + need > HOLD_LIMIT:
+            raise TooBig("%d MB held, %d MB more asked" % (self.held // 2 ** 20, need // 2 ** 20))
+
+    def inbox_path(self, pid, slot, handover_id):
+        return "%s/inbox/%s/%s/%s%s" % (self.work, handover_id, pid, slot, INBOX_SUFFIX)
+
+    def carry(self, job):
+        """Move every kept file still here into the library folder, wait until the sync client has
+        carried each one to SharePoint and let its local bytes go."""
+        paths = []
+        for slot, entry in job.ledger.items():
+            if entry.get("carried"):
                 continue
-            freed = 0
-            for name in os.listdir(self.home(pid)):
-                if name in KEPT_AFTER_PUBLISHED:
-                    continue
-                path = archives.long_path(os.path.join(self.home(pid), name))
-                if os.path.isdir(path):
-                    for root, _, files in os.walk(path):
-                        freed += sum(os.path.getsize(os.path.join(root, f)) for f in files)
-                    shutil.rmtree(path)
-                else:
-                    freed += os.path.getsize(path)
-                    os.remove(path)
-            state["status"] = "published"
-            self.save_state(pid, state)
-            self.log("%s published by the library: freed %d MB" % (pid, freed // 2 ** 20))
+            if not entry.get("under"):
+                self.library.move_in(self.inbox_path(job.pid, slot, job.handover_id), job.file(slot))
+                entry["under"] = job.handover_id
+            paths.append((entry, self.inbox_path(job.pid, slot, entry["under"])))
+        if not paths:
+            return
+        save_json(os.path.join(job.home, "selection.json"), job.selected)
+        if not self.wait_for_sync([p for _, p in paths]):
+            raise CarryFailed("the sync client did not carry the files")
+        self.wait_for_let_go([p for _, p in paths])
+        for entry, _ in paths:
+            entry["carried"] = True
+        save_json(os.path.join(job.home, "selection.json"), job.selected)
+
+    def wait_for_let_go(self, paths):
+        """True once none of the paths holds local bytes any more."""
+        deadline = time.monotonic() + LET_GO_WAIT
+        while True:
+            paths = self.library.let_go(paths)
+            if not paths:
+                return
+            if time.monotonic() >= deadline:
+                raise CarryFailed("the sync client did not free %d files, e.g. %s"
+                                  % (len(paths), paths[0]))
+            time.sleep(LET_GO_PAUSE)
 
     # ---------------------------------------------------------------- selection and download
     def select(self, home, tender):
@@ -699,15 +869,14 @@ class Downloader:
                 "decision": decision, "reason": reason, "stored": None, "size": None,
                 "sha256": None}
 
-    def download(self, home, selected, beat):
-        """Download every kept file not yet complete; sort the members of archives.
+    def download(self, job):
+        """Download every kept file not yet here or in the library; sort the members of archives.
 
         Before each file the lease must still be this computer's. A file EIS refuses is left
         for the next attempt and the others go on; FilesFailed then names them. The selection
         is saved after every file, so a run stopped by sleep or a lost network starts again at
-        the first unfinished file. A file is renamed into place only once it is whole, so one
-        found on disk is taken as it is."""
-        pid = selected["pid"]
+        the first unfinished file. A file enters the ledger only once it is whole."""
+        selected = job.selected
         page = None
         records = {str(r["id"]): r for r in selected["records"]}
         last_bytes, out, files, failed = 0, [], selected["files"], []
@@ -715,50 +884,284 @@ class Downloader:
             if f["decision"] != selection.DOWNLOAD or f["archive"]:
                 out.append(f)
                 continue
-            stored = f["slot"]
-            target = os.path.join(home, "files", stored)
-            if f.get("sha256") and os.path.exists(target) and os.path.getsize(target) == f["size"]:
+            if f["slot"] in job.ledger:
+                out.append(self.from_ledger(job, f))
+                continue
+            if job.beat.lost.is_set():
+                raise LeaseGone("the lease of %s lapsed or went to another computer" % job.pid)
+            if page is None:
+                page = eis_fetch.Tender(job.pid, os.path.join(job.home, "work"))
+            if last_bytes:
+                time.sleep(eis_fetch.pause_for(last_bytes))
+            try:
+                got, last_bytes = self.take(job, page, f, records[str(f["record_id"])])
+            except eis_fetch.Withdrawn:
+                raise
+            except eis_fetch.Fail as exc:
+                self.log("  file %s not downloaded: %s" % (f["slot"][:3], str(exc)[:200]))
+                failed.append(f["slot"][:3])
                 out.append(f)
                 continue
-            if beat.lost.is_set():
-                raise LeaseGone("the lease of %s lapsed or went to another computer" % pid)
-            record = records[str(f["record_id"])]
-            if not os.path.exists(target):
-                if page is None:
-                    page = eis_fetch.Tender(pid, os.path.join(home, "work"))
-                if last_bytes:
-                    time.sleep(eis_fetch.pause_for(last_bytes))
-                part = target + ".part"
-                try:
-                    if f["file_id"] is None:
-                        page.download_record_zip(record, part)
-                        announced = None
-                    else:
-                        announced = page.download_file(record, f["file_id"], part)
-                    size = os.path.getsize(part)
-                    if announced is not None and announced != size:
-                        raise eis_fetch.Fail("%d of %d bytes" % (size, announced))
-                except eis_fetch.Withdrawn:
-                    raise
-                except eis_fetch.Fail as exc:
-                    self.log("  file %s not downloaded: %s" % (f["slot"][:3], str(exc)[:200]))
-                    failed.append(f["slot"][:3])
-                    out.append(f)
-                    continue
-                os.replace(part, target)
-                last_bytes = size
-            f = dict(f, stored=stored, size=os.path.getsize(target),
-                     sha256=eis_fetch.sha256_file(target))
-            out.append(f)
-            if f["file_id"] is None or self.is_archive(f["name"], target):
-                out += self.sort_archive(home, f, record)
+            out += got
             selected["files"] = out + files[n + 1:]
-            save_json(os.path.join(home, "selection.json"), selected)
+            save_json(os.path.join(job.home, "selection.json"), selected)
         selected["files"] = out
-        save_json(os.path.join(home, "selection.json"), selected)
+        save_json(os.path.join(job.home, "selection.json"), selected)
         if failed:
             raise FilesFailed("%d files not downloaded: %s" % (len(failed), ", ".join(failed)))
         return selected
+
+    @staticmethod
+    def from_ledger(job, entry):
+        held = job.ledger[entry["slot"]]
+        return dict(entry, stored=entry["slot"], size=held["size"], sha256=held["sha256"])
+
+    def hold(self, job, entry):
+        """A whole file of the tender is in its folder: note it, so it is carried and not taken
+        again."""
+        entry["stored"] = entry["slot"]
+        job.ledger[entry["slot"]] = {"size": entry["size"], "sha256": entry["sha256"]}
+        save_json(os.path.join(job.home, "selection.json"), job.selected)
+
+    def left_out(self, job, entry, exc):
+        """The file does not fit in what this computer may hold. The manifest names it."""
+        self.log("  %s left out, larger than this computer may hold: %s" % (entry["slot"][:7], exc))
+        notify("Tender %s: a file left out" % job.pid,
+               "%s does not fit in the %d MB the radar may hold." % (entry["name"], HOLD_LIMIT // 10 ** 6))
+        entry.update(decision=selection.SKIP, stored=None, size=None, sha256=None,
+                     reason="larger than the %d MB this computer may hold" % (HOLD_LIMIT // 10 ** 6))
+
+    def may_be_archive(self, name):
+        return self.rules.is_archive(name) or not selection.extension(name)
+
+    def starts_as_archive(self, name, head):
+        """An archive by its extension, or a file without one that starts like an archive."""
+        if self.rules.is_archive(name):
+            return True
+        return not selection.extension(name) and archives.starts_like_archive(head)
+
+    def take(self, job, page, f, record):
+        """One file from the portal. A ZIP is sorted as it arrives; anything else comes to disk,
+        and is sorted there if it is an archive. Returns (the file's entries, bytes read)."""
+        entry = dict(f)
+
+        def request():
+            if f["file_id"] is None:
+                return page.stream_record_zip(record)
+            return page.stream_file(record, f["file_id"])
+
+        announced, chunks = request()
+        tally = Tally(chunks)
+        try:
+            head = tally.first()
+            if not head:
+                raise eis_fetch.Fail("file %s of record %s came back empty"
+                                     % (f["file_id"], record["id"]))
+            if f["file_id"] is None and not head.startswith(zip_stream.LOCAL_HEADER):
+                raise eis_fetch.Fail("the archive of record %s is not a ZIP" % record["id"])
+            if head.startswith(zip_stream.LOCAL_HEADER) \
+                    and (f["file_id"] is None or self.may_be_archive(f["name"])):
+                try:
+                    entries = self.sort_stream(job, entry, tally, record, 0)
+                    tally.drain()
+                    self.check_size(tally, announced)
+                    entry.update(size=tally.size, sha256=tally.hash.hexdigest())
+                    return [entry] + entries, tally.size
+                except zip_stream.NotStreamable as exc:
+                    self.log("  archive %s taken to disk: %s" % (f["slot"][:3], exc))
+                    tally.close()
+                    entry = dict(f)
+                    announced, chunks = request()
+                    tally = Tally(chunks)
+            return self.take_to_disk(job, entry, tally, announced, record), tally.size
+        finally:
+            tally.close()
+
+    @staticmethod
+    def check_size(tally, announced):
+        if announced is not None and announced != tally.size:
+            raise eis_fetch.Fail("%d of %d bytes" % (tally.size, announced))
+
+    def take_to_disk(self, job, entry, tally, announced, record):
+        target = job.file(entry["slot"])
+        try:
+            self.write(job, target, tally)
+        except TooBig as exc:
+            self.left_out(job, entry, exc)
+            return [entry]
+        try:
+            self.check_size(tally, announced)
+        except eis_fetch.Fail:
+            self.held -= tally.size
+            os.remove(target)
+            raise
+        entry.update(size=tally.size, sha256=tally.hash.hexdigest())
+        return [entry] + self.settle_file(job, entry, target, tally.first(), record, 0)
+
+    def settle_file(self, job, entry, target, head, record, depth):
+        """A whole file in the tender's folder: sort it if it is an archive, keep it otherwise."""
+        nested = []
+        if depth < MAX_NESTING and self.starts_as_archive(entry["name"], head):
+            nested = self.sort_disk(job, entry, target, record, depth)
+            if entry["decision"] == "unpacked":
+                self.held -= os.path.getsize(target)
+                os.remove(target)
+                return nested
+        self.hold(job, entry)
+        return nested
+
+    def write(self, job, target, chunks):
+        """Write `chunks` to `target`, which appears only once whole, staying inside the limit."""
+        part, written = target + ".part", 0
+        try:
+            with open(part, "wb") as fh:
+                for chunk in chunks:
+                    if self.held + len(chunk) > HOLD_LIMIT:
+                        fh.flush()
+                        self.make_room(job, len(chunk))
+                    fh.write(chunk)
+                    written += len(chunk)
+                    self.held += len(chunk)
+        except BaseException:
+            self.held -= written
+            if os.path.exists(part):
+                os.remove(part)
+            raise
+        os.replace(part, target)
+
+    def member_entry(self, archive_entry, label, prefix, record, i, member):
+        name = member.split("/")[-1]
+        kind = self.rules.kind_of(name, folders=member.split("/")[:-1],
+                                  archive=archive_entry["name"], record_title=record["title"],
+                                  type_title=record.get("type_title"))
+        decision, reason = self.rules.decide(kind, record["section"])
+        return dict(archive_entry, archive=label, member=member, name=name, kind=kind,
+                    decision=decision, reason=reason, stored=None, size=None, sha256=None,
+                    slot="%s.%03d_%s" % (prefix, i, safe_name(name, 80)))
+
+    @staticmethod
+    def as_unpacked(archive_entry):
+        """Mark the archive sorted. Returns the label and the slot prefix of its members."""
+        label = "/".join(p for p in (archive_entry.get("archive"), archive_entry.get("member")
+                                     or archive_entry["name"]) if p)
+        archive_entry["decision"] = "unpacked"
+        archive_entry["reason"] = "members sorted; the kept ones travel on their own"
+        archive_entry["stored"] = None
+        return label, archive_entry["slot"].split("_", 1)[0]
+
+    def sort_stream(self, job, archive_entry, chunks, record, depth):
+        """Sort a ZIP as it arrives: every member is decided like a file, the kept ones travel on
+        their own and archives inside it are sorted the same way. The archive is never stored."""
+        original = dict(archive_entry)
+        label, prefix = self.as_unpacked(archive_entry)
+        entries, count = [], 0
+        for member, body in zip_stream.members(chunks):
+            if not member or member.endswith("/"):
+                continue
+            m = self.member_entry(original, label, prefix, record, count, member)
+            count += 1
+            entries.append(m)
+            if m["decision"] != selection.DOWNLOAD:
+                continue
+            if job.beat.lost.is_set():
+                raise LeaseGone("the lease of %s lapsed or went to another computer" % job.pid)
+            if not eis_fetch.safe_member(member):
+                raise archives.Unreadable("unsafe member path %r" % member)
+            entries += self.take_member(job, m, body, record, depth)
+        if not count:
+            raise zip_stream.NotStreamable("no members found")
+        return entries
+
+    def take_member(self, job, m, body, record, depth):
+        """A kept member as it comes out of its archive. Returns the entries of what was in it."""
+        if m["slot"] in job.ledger:
+            m.update(self.from_ledger(job, m))
+            return []
+        tally = Tally(body)
+        head = tally.first()
+        if depth < MAX_NESTING and head.startswith(zip_stream.LOCAL_HEADER) \
+                and self.starts_as_archive(m["name"], head):
+            nested = self.sort_stream(job, m, tally, record, depth + 1)
+            tally.drain()
+            m.update(size=tally.size, sha256=tally.hash.hexdigest())
+            return nested
+        target = job.file(m["slot"])
+        try:
+            self.write(job, target, tally)
+        except TooBig as exc:
+            self.left_out(job, m, exc)
+            return []
+        m.update(size=tally.size, sha256=tally.hash.hexdigest())
+        return self.settle_file(job, m, target, head, record, depth + 1)
+
+    def sort_disk(self, job, archive_entry, path, record, depth):
+        """Sort an archive that has to be on disk, as 7z and RAR have to. An archive whose member
+        list cannot be read travels whole. The kept members come out in passes that fit in the
+        limit; an archive inside it comes out on its own, written nowhere if it is a ZIP."""
+        try:
+            sized = archives.sized_members(path)
+        except archives.Unreadable as exc:
+            self.log("  archive %s kept whole: %s" % (archive_entry["slot"][:3], type(exc).__name__))
+            return []
+        if not sized:
+            return []
+        original = dict(archive_entry)
+        label, prefix = self.as_unpacked(archive_entry)
+        entries = [self.member_entry(original, label, prefix, record, i, member)
+                   for i, (member, _) in enumerate(sized)]
+        sizes = {m["slot"]: size for m, (_, size) in zip(entries, sized)}
+        kept = [m for m in entries if m["decision"] == selection.DOWNLOAD]
+        nested_of = {}
+        for m in kept:
+            if m["slot"] in job.ledger:
+                m.update(self.from_ledger(job, m))
+        waiting = [m for m in kept if not m["stored"]]
+        plain = [m for m in waiting if depth >= MAX_NESTING or not self.may_be_archive(m["name"])]
+        self.unpack_in_passes(job, path, plain, sizes)
+        for m in waiting:
+            if m in plain:
+                continue
+            decided = dict(m)
+            try:
+                nested_of[m["slot"]] = self.take_member(
+                    job, m, archives.member_chunks(path, m["member"]), record, depth)
+            except zip_stream.NotStreamable as exc:
+                # It travels whole, as an archive that cannot be read does.
+                self.log("  archive %s kept whole: %s" % (m["slot"][:7], exc))
+                m.update(decided)
+                self.unpack_in_passes(job, path, [m], sizes)
+        decided = []
+        for m in entries:
+            decided.append(m)
+            decided += nested_of.get(m["slot"], [])
+        return decided
+
+    def unpack_in_passes(self, job, path, members, sizes):
+        """Unpack members in as few reads of the archive as the limit allows."""
+        waiting, counted = [], 0
+
+        def unpack():
+            archives.extract_many(path, [(m["member"], job.file(m["slot"])) for m in waiting])
+            for m in waiting:
+                target = job.file(m["slot"])
+                m.update(size=os.path.getsize(target), sha256=eis_fetch.sha256_file(target))
+                self.held += m["size"]
+                self.hold(job, m)
+            del waiting[:]
+
+        for m in members:
+            size = sizes[m["slot"]]
+            if self.held + counted + size > HOLD_LIMIT:
+                unpack()
+                counted = 0
+                try:
+                    self.make_room(job, size)
+                except TooBig as exc:
+                    self.left_out(job, m, exc)
+                    continue
+            waiting.append(m)
+            counted += size
+        unpack()
 
     def wait_for_network(self):
         """True once the portal answers again; False if it stays out of reach for NETWORK_WAIT."""
@@ -771,81 +1174,41 @@ class Downloader:
         self.log("  the network is back")
         return True
 
-    def is_archive(self, name, path):
-        """An archive by its extension, or a file without one that starts like an archive."""
-        if self.rules.is_archive(name):
-            return True
-        return not selection.extension(name) and archives.looks_like_archive(path)
-
-    def sort_archive(self, home, archive_entry, record, depth=0):
-        """Unpack an archive: every member is decided like a file, the kept ones travel on
-        their own and archives inside it are sorted the same way. An archive whose member
-        list cannot be read travels whole."""
-        path = os.path.join(home, "files", archive_entry["stored"])
-        try:
-            names = archives.members(path)
-        except archives.Unreadable as exc:
-            self.log("  archive %s kept whole: %s" % (archive_entry["slot"][:3], type(exc).__name__))
-            return []
-        if not names:
-            return []
-        label = "/".join(p for p in (archive_entry.get("archive"), archive_entry.get("member")
-                                     or archive_entry["name"]) if p)
-        archive_entry["decision"] = "unpacked"
-        archive_entry["reason"] = "members sorted; the kept ones travel on their own"
-        prefix = archive_entry["slot"].split("_", 1)[0]
-        entries = []
-        for i, member in enumerate(names):
-            name = member.split("/")[-1]
-            kind = self.rules.kind_of(name, folders=member.split("/")[:-1],
-                                      archive=archive_entry["name"], record_title=record["title"],
-                                      type_title=record.get("type_title"))
-            decision, reason = self.rules.decide(kind, record["section"])
-            entries.append(dict(archive_entry, archive=label, member=member, name=name, kind=kind,
-                                decision=decision, reason=reason, stored=None, size=None,
-                                sha256=None, slot="%s.%03d_%s" % (prefix, i, safe_name(name, 80))))
-        kept = [m for m in entries if m["decision"] == selection.DOWNLOAD]
-        # Members already on disk came out whole in an earlier run; the rest come out together.
-        archives.extract_many(path, [(m["member"], os.path.join(home, "files", m["slot"]))
-                                     for m in kept
-                                     if not os.path.exists(os.path.join(home, "files", m["slot"]))])
-        decided = []
-        for m in entries:
-            decided.append(m)
-            if m["decision"] != selection.DOWNLOAD:
-                continue
-            target = os.path.join(home, "files", m["slot"])
-            m.update(stored=m["slot"], size=os.path.getsize(target),
-                     sha256=eis_fetch.sha256_file(target))
-            if depth < MAX_NESTING and self.is_archive(m["name"], target):
-                decided += self.sort_archive(home, m, record, depth + 1)
-                if m["decision"] == "unpacked":
-                    os.remove(target)
-        return decided
-
-    def fetch(self, tender, beat):
+    def fetch(self, job, tender):
         """Selection, then download, through a lost network. Returns (outcome, detail):
         downloaded, withdrawn, lease lost, interrupted or attempt_failed."""
-        pid = tender["pid"]
-        home = self.home(pid)
+        pid, home, beat = job.pid, job.home, job.beat
+        broken_off, gained = 0, 0
         while True:
             try:
-                selected = load_json(os.path.join(home, "selection.json"))
-                if not selected:
-                    selected = self.select(home, tender)
-                self.download(home, selected, beat)
+                job.selected = load_json(os.path.join(home, "selection.json"))
+                if not job.selected:
+                    job.selected = self.select(home, tender)
+                self.measure()
+                selected = self.download(job)
                 kept = sum(1 for f in selected["files"] if f["decision"] == selection.DOWNLOAD)
                 skipped = sum(1 for f in selected["files"] if f["decision"] == selection.SKIP)
                 self.log("  %s downloaded: %d files kept, %d skipped" % (pid, kept, skipped))
                 return "downloaded", None
             except LeaseGone as exc:
                 return "lease lost", str(exc)
+            except CarryFailed as exc:
+                return "interrupted", str(exc)
             except eis_fetch.Withdrawn as exc:
                 self.log("  %s withdrawn: %s" % (pid, exc))
                 return "withdrawn", str(exc)[:300]
             except eis_fetch.Offline as exc:
                 # A lost network is no fault of the tender: it keeps its attempts.
                 self.log("  %s: the portal is out of reach: %s" % (pid, str(exc)[:200]))
+                # The portal answers again at once, yet breaks off with nothing gained since the
+                # last time: that is no lost network.
+                progress = len(job.ledger) if job.selected else 0
+                if network_up():
+                    broken_off = broken_off + 1 if progress == gained else 1
+                    gained = progress
+                    if broken_off >= MAX_BROKEN_OFF:
+                        return "attempt_failed", str(exc)[:300]
+                    time.sleep(NETWORK_PAUSE)
                 if not self.wait_for_network():
                     return "interrupted", "the network stayed down for two hours"
                 if not beat.beat():
@@ -855,36 +1218,39 @@ class Downloader:
                 return "attempt_failed", str(exc)[:300]
 
     # ---------------------------------------------------------------- the hand-over
-    def manifest(self, day, given, tender, status, detail):
+    def manifest(self, job, day, given, tender, status, detail):
         pid = tender["pid"]
-        selected = load_json(os.path.join(self.home(pid), "selection.json"), {}) \
-            if status == "downloaded" else {}
-        files = [dict(f, stored="%s/%s" % (pid, f["stored"]) if f.get("stored") else None)
-                 for f in selected.get("files", [])]
+        selected = job.selected or {}
+        ledger = selected.get("ledger", {})
+        files = []
+        if status == "downloaded":
+            for f in selected.get("files", []):
+                entry = dict(f, stored="%s/%s" % (pid, f["stored"]) if f.get("stored") else None)
+                if f["decision"] == selection.DOWNLOAD and f.get("stored"):
+                    entry["inbox"] = entry["stored"] + INBOX_SUFFIX
+                    entry["carried_under"] = ledger[f["stored"]]["under"]
+                files.append(entry)
+        else:
+            selected = {}
+        # A hand-over names every staging folder that holds files of the tender, so the processing
+        # removes them all, also the files of an attempt that did not finish.
+        inboxes = sorted({job.handover_id} | {e["under"] for e in ledger.values() if e.get("under")})
         return {"schema": "tender-manifest/1", "country": self.country, "date": given["date"],
                 "pid": pid, "lease": given["lease"], "computer": self.computer,
-                "window": day["window"],
+                "window": day["window"], "inboxes": inboxes,
                 "tender": {"pid": pid, "status": status, "watched": tender["watched"],
                            "notice": tender.get("notice"), "error": detail,
                            "url": selected.get("url"), "procurement": selected.get("procurement"),
                            "records": selected.get("records", []), "files": files}}
 
-    def copy(self, inbox, manifest):
-        """Copy the kept files, then the manifest last. Returns every library path copied."""
-        pid = manifest["pid"]
-        paths = []
-        for f in manifest["tender"]["files"]:
-            if f["decision"] != selection.DOWNLOAD or not f["stored"]:
-                continue
-            f["inbox"] = f["stored"] + INBOX_SUFFIX
-            local = os.path.join(self.home(pid), "files", f["stored"].split("/", 1)[1])
-            self.library.upload("%s/%s" % (inbox, f["inbox"]), local)
-            paths.append("%s/%s" % (inbox, f["inbox"]))
-        local = os.path.join(self.home(pid), "manifest.json")
+    def send_manifest(self, job, manifest):
+        """Copy the manifest into the staging folder. Returns its library path."""
+        path = "%s/inbox/%s/manifest.json" % (self.work, job.handover_id)
+        local = os.path.join(job.home, "manifest.json")
         save_json(local, manifest)
-        self.library.upload(inbox + "/manifest.json", local, replace=True)
-        paths.append(inbox + "/manifest.json")
-        return paths
+        self.library.upload(path, local, replace=True)
+        os.remove(local)
+        return path
 
     def wait_for_sync(self, paths):
         """True once the sync client has carried every copied file and the manifest."""
@@ -902,17 +1268,22 @@ class Downloader:
             paths = waiting
             time.sleep(SYNC_PAUSE)
 
-    def hand_over(self, day, given, tender, status, detail, state):
+    def hand_over(self, job, day, given, tender, status, detail, state):
         pid, lease, date = tender["pid"], given["lease"], given["date"]
-        handover_id = "%s-%s" % (pid, lease)
-        inbox = "%s/inbox/%s" % (self.work, handover_id)
+        handover_id = job.handover_id
         try:
-            paths = self.copy(inbox, self.manifest(day, given, tender, status, detail))
+            if status == "downloaded":
+                self.carry(job)
+            manifest = self.send_manifest(job, self.manifest(job, day, given, tender, status, detail))
+        except CarryFailed as exc:
+            self.log("  %s" % exc)
+            return self.release(given, "interrupted", str(exc))
         except Exception as exc:
             self.log("  copy into the library interrupted: %s" % exc)
             return self.release(given, "interrupted", "copy: %s" % str(exc)[:200])
-        if not self.wait_for_sync(paths):
+        if not self.wait_for_sync([manifest]):
             return self.release(given, "interrupted", "the sync client did not carry the files")
+        self.library.let_go([manifest])
         try:
             answer = self.coordinator.handover(date, pid, lease)
         except coordinator.Error as exc:
@@ -922,10 +1293,12 @@ class Downloader:
             self.log("  %s was handed over by another computer first" % pid)
             state.update(status="superseded", handover_id=handover_id)
             self.save_state(pid, state)
+            self.clear(pid)
             return "superseded"
         state.update(status="handed over", handover_id=handover_id,
                      handed_over_at=stamp(now_utc()))
         self.save_state(pid, state)
+        self.clear(pid)
         self.log("  %s handed over as %s; processing %s" % (
             pid, handover_id, "started" if answer.get("dispatched") else "to be started by the coordinator"))
         return "handed over"
@@ -961,7 +1334,8 @@ class Downloader:
             entry = next((t for t in day.get("tenders", []) if str(t.get("pid")) == pid), {})
             tender = {"pid": pid, "watched": bool(given.get("watched", entry.get("watched"))),
                       "notice": entry.get("notice")}
-            status, detail = self.fetch(tender, beat)
+            job = Job(pid, self.home(pid), "%s-%s" % (pid, lease), beat)
+            status, detail = self.fetch(job, tender)
             if status == "lease lost":
                 self.log("  %s: %s" % (pid, detail))
                 return "lease lost"
@@ -969,16 +1343,17 @@ class Downloader:
                 return self.release(given, status, detail)
             # The coordinator takes a hand-over under an older lease while nobody has handed the
             # tender over, so a lease lost from here on does not stop it.
-            return self.hand_over(day, given, tender, status, detail, state)
+            return self.hand_over(job, day, given, tender, status, detail, state)
 
     def run(self, since=None):
         """Join the day, then take tenders until none is left. Returns [(pid, outcome)]."""
         self.log = Log(os.path.join(self.root, "logs", "downloader.log"))
         self.log("run on %s, code %s" % (self.computer, (self.version or "unknown")[:12]))
         self.read_rules()
-        self.free_space()
-        self.join(since)
+        self.free_space(self.join(since))
         results = []
+        if not self.settle_disk():
+            return results
         deadline = time.monotonic() + DAY_WAIT
         while True:
             given = self.coordinator.take()

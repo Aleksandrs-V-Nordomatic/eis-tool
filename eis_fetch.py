@@ -57,6 +57,10 @@ class Offline(Exception):
 # curl exit codes for a portal that was never reached or a line that broke mid-answer:
 # host not resolved, no connection, timed out, TLS handshake, empty reply, send, receive.
 OFFLINE_CODES = {6, 7, 28, 35, 52, 55, 56}
+# A file read as it arrives: the longest a transfer may take, pauses to carry files away included,
+# and how much is read at a time.
+STREAM_TIMEOUT = 4 * 3600
+STREAM_CHUNK = 2 ** 20
 
 
 def canonical_url(raw):
@@ -111,6 +115,70 @@ class Curl:
             if v:
                 headers[k.strip().lower()] = v.strip()
         return headers, body
+
+    def stream(self, url, timeout=STREAM_TIMEOUT):
+        """A GET read as it arrives, written nowhere. Returns (headers, the body as chunks); a
+        transfer that breaks raises at the point it broke. Nothing is retried here: the bytes
+        already read cannot be taken back, so the caller starts the file again."""
+        cmd = ["curl", "-sS", "--fail-with-body", "--location", "--compressed",
+               "--connect-timeout", "45", "--max-time", str(timeout),
+               "--cookie", self.jar, "--cookie-jar", self.jar,
+               "-A", UA, "-H", "Accept-Language: lv,en;q=0.8",
+               "-H", "Referer: " + self.referer, "-D", "-", url]
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                creationflags=NO_WINDOW)
+
+        def failed():
+            proc.stdout.close()
+            error = proc.stderr.read()
+            proc.stderr.close()
+            code = proc.wait()
+            kind = Offline if code in OFFLINE_CODES else Fail
+            return kind("curl failed (%d): %s" % (code, error.decode("utf-8", "replace")[:300]))
+
+        blob = b""
+        while True:
+            head, mark, rest = blob.partition(b"\r\n\r\n")
+            if mark:
+                # A redirect or a 100 Continue comes before the real answer's headers.
+                if not (rest.startswith(b"HTTP/")
+                        or re.match(rb"HTTP/\S+ (1\d\d|30[12378])\b", head)):
+                    break
+                blob = rest
+                continue
+            chunk = proc.stdout.read1(STREAM_CHUNK)
+            if not chunk:
+                raise failed()
+            blob += chunk
+        headers = {}
+        for line in head.decode("utf-8", "replace").splitlines()[1:]:
+            k, _, v = line.partition(":")
+            if v:
+                headers[k.strip().lower()] = v.strip()
+
+        def body():
+            finished = False
+            try:
+                if rest:
+                    yield rest
+                while True:
+                    chunk = proc.stdout.read1(STREAM_CHUNK)
+                    if not chunk:
+                        break
+                    yield chunk
+                finished = True
+            finally:
+                if not finished:
+                    proc.kill()
+                    proc.wait()
+                    proc.stdout.close()
+                    proc.stderr.close()
+            if proc.wait() != 0:
+                raise failed()
+            proc.stdout.close()
+            proc.stderr.close()
+
+        return headers, body()
 
     def get_text(self, url):
         return self._split_headers(self._run([url]))[1]
@@ -231,6 +299,29 @@ class Tender:
             raise Fail("file %s of record %s came back empty" % (file_id, record["id"]))
         announced = headers.get("content-length")
         return int(announced) if announced and announced.isdigit() else None
+
+    def stream_file(self, record, file_id):
+        """One file read as it arrives. Returns (the Content-Length the portal announced, chunks)."""
+        url = "%s/EKEIS/Document/DownloadDocumentFile?%s" % (BASE, urlencode({
+            "Id": record["id"], "FileId": file_id,
+            "DocumentLinkTypeCode": record["document_link_type_code"],
+            "ProcurementIdentifier": self.pid}))
+        return self._streamed(url, "file %s of record %s" % (file_id, record["id"]))
+
+    def stream_record_zip(self, record):
+        """The whole record as one ZIP, read as it arrives."""
+        url = "%s/EKEIS/Document/DownloadDocumentFilesInZip?%s" % (BASE, urlencode({
+            "Id": record["id"], "DocumentLinkTypeCode": record["document_link_type_code"],
+            "ProcurementIdentifier": self.pid}))
+        return self._streamed(url, "the archive of record %s" % record["id"])
+
+    def _streamed(self, url, what):
+        headers, chunks = self.curl.stream(url)
+        if "text/html" in (headers.get("content-type") or "").lower():
+            chunks.close()
+            raise Fail("EIS returned a page instead of %s" % what)
+        announced = headers.get("content-length")
+        return (int(announced) if announced and announced.isdigit() else None), chunks
 
     def download_record_zip(self, record, dest):
         """The whole record as one ZIP, for a record whose files cannot be listed."""
