@@ -198,6 +198,19 @@ def _records(manifest):
                              "section": record.get("section"),
                              "withheld": True,
                              "files": {}})
+    # A record the document rules did not download — the archive section — is on the page
+    # all the same. Kept with no files, so a new superseded version still reads as news and
+    # a record is never reported gone only because nothing of it was read.
+    for skipped in (manifest or {}).get("skipped", []):
+        if skipped.get("what") != "record":
+            continue
+        out.setdefault(str(skipped.get("record_id")),
+                       {"publish_date": skipped.get("publish_date"),
+                        "title": skipped.get("record_title"),
+                        "type_code": skipped.get("type_code"),
+                        "section": skipped.get("section"),
+                        "withheld": False,
+                        "files": {}})
     return out
 
 

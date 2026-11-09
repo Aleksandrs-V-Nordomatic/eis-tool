@@ -40,6 +40,12 @@ those nest — an archive holding an archive holding the project. Treating one a
 leaves a tender looking documented and unread at once, the worst state because it is
 invisible. Depth, file count and expanded size are capped so a bomb fails loudly instead of
 filling the runner.
+
+THE DOCUMENT RULES DECIDE WHICH MEMBERS OF AN ARCHIVE ARE READ, when the fetch ran under them
+(it leaves `document_rules.json` in the pack). Each member of a downloaded archive is given a
+kind like any file of its record, and a member of a kind that is not read is not extracted.
+That is the fetch's own decision carried one level down, not a judgement made here — and the
+member is still named, with its kind and reason, in the manifest's `skipped` list.
 """
 
 import argparse
@@ -51,6 +57,8 @@ import re
 import shutil
 import time
 import zipfile
+
+import selection
 
 # Signed Latvian containers nest: a 7z holds a ZIP, the ZIP holds an .edoc, and that .edoc
 # holds another .edoc. At depth 3 three real documents went unread. Expansion is still
@@ -685,8 +693,13 @@ def legacy_to_md(path, media_dir, stem, kind):
 
 
 # ----------------------------------------------------------------------------- unpacking
-def unpack(path, dest, kind, budget):
+def unpack(path, dest, kind, budget, keep=None):
     """Extract an archive, refusing traversal and honouring the expansion budget.
+
+    `keep(member)` says whether a member is extracted; None extracts every one. A member left
+    out costs no budget, so an archive whose skipped photos alone would pass the limit still
+    gives up the documents beside them. Returns False only when `keep` was given and could
+    not be honoured, so every member was extracted after all.
 
     The destination is always emptied first. py7zr raises FileExistsError when it extracts
     into a directory that already holds those names, and that error surfaces as
@@ -705,6 +718,8 @@ def unpack(path, dest, kind, budget):
                 name = m.filename.replace("\\", "/")
                 if name.startswith("/") or ".." in name.split("/") or os.path.isabs(name):
                     raise ValueError("unsafe path in archive: %r" % name)
+                if keep is not None and not keep(name):
+                    continue
                 budget[0] -= m.file_size
                 if budget[0] < 0:
                     raise ValueError("archive expands past the size limit")
@@ -712,10 +727,23 @@ def unpack(path, dest, kind, budget):
                 os.makedirs(os.path.dirname(target), exist_ok=True)
                 with z.open(m) as src, open(target, "wb") as dst:
                     shutil.copyfileobj(src, dst)
-        return
+        return True
+    decided = True
+    if keep is not None:
+        outcome = _unpack_7z_kept(path, dest, budget, keep)
+        if outcome == "kept":
+            return True
+        # "all": nothing to leave out, so the usual path below is exactly right.
+        # "failed": the members could not be extracted one by one, so every member is, and
+        # the caller withdraws what it recorded as skipped — nothing may vanish here.
+        decided = outcome == "all"
+        if not decided:
+            shutil.rmtree(dest, ignore_errors=True)      # whatever the failed try left behind
+            os.makedirs(dest, exist_ok=True)
     binary = shutil.which("7z") or shutil.which("7za")
     if binary:
-        return _unpack_7z_cli(binary, path, dest, budget)
+        _unpack_7z_cli(binary, path, dest, budget)
+        return decided
     # Fallback where the CLI is absent (a local Windows checkout). On the runner the CLI
     # is installed and 20 seconds faster on the 484 MB acceptance archive, and using it
     # removes one library-version axis from the "same bytes, same text" claim.
@@ -733,6 +761,49 @@ def unpack(path, dest, kind, budget):
         if budget[0] < 0:
             raise ValueError("archive expands to %s bytes, past the limit" % f"{total:,}")
         z.extractall(dest)
+    return decided
+
+
+def _unpack_7z_kept(path, dest, budget, keep):
+    """Only the kept members of a 7z: "kept" when done, "all" when every member is kept,
+    "failed" when py7zr could not do it.
+
+    WHY py7zr AND NOT THE CLI HERE. Deciding a member needs its exact name, and the CLI's
+    listing is printed in the runner's locale: the image sets none, so a Latvian name can
+    come back mangled and a list of kept names fed back to `7z x` would not match. py7zr
+    reads the names from the archive itself, whatever the locale.
+    """
+    import py7zr
+    try:
+        with py7zr.SevenZipFile(path, "r") as z:
+            infos = [i for i in z.list() if not getattr(i, "is_directory", False)]
+    except Exception:
+        return "failed"
+    if len(infos) > MAX_MEMBERS:
+        raise ValueError("archive holds %d members, limit %d" % (len(infos), MAX_MEMBERS))
+    for info in infos:
+        clean = info.filename.replace("\\", "/")
+        if clean.startswith("/") or ".." in clean.split("/") or os.path.isabs(clean):
+            raise ValueError("unsafe path in archive: %r" % info.filename)
+    kept = [i for i in infos if keep(i.filename.replace("\\", "/"))]
+    if len(kept) == len(infos):
+        return "all"
+    total = sum(getattr(i, "uncompressed", 0) or 0 for i in kept)
+    if budget[0] - total < 0:
+        raise ValueError("archive expands to %s bytes, past the limit" % f"{total:,}")
+    if kept:
+        try:
+            with py7zr.SevenZipFile(path, "r") as z:
+                z.extract(path=dest, targets=[i.filename for i in kept])
+        except Exception:
+            return "failed"
+        for info in kept:
+            target = os.path.join(dest, *[p for p in info.filename.replace("\\", "/").split("/")
+                                          if p])
+            if not os.path.exists(target):
+                return "failed"
+    budget[0] -= total
+    return "kept"
 
 
 def _unpack_7z_cli(binary, path, dest, budget):
@@ -779,8 +850,47 @@ def _unpack_7z_cli(binary, path, dest, budget):
 
 
 # -------------------------------------------------------------------------------- driver
-def convert(path, out_root, rel_stem, budget, depth=0):
-    """One file to Markdown, recursing into archives. Returns manifest entries."""
+class Sorting(object):
+    """The document rules, applied to the members of one downloaded file's archives.
+
+    The same decision the fetch makes for the files of a record, one level down: a member is
+    given a kind from its own name, the folders it sits in, the archive's name, the record
+    title and the EIS document type, and is extracted only when that kind is read. A skipped
+    member is collected here, never silently dropped.
+    """
+
+    def __init__(self, rules, record):
+        self.rules, self.record, self.skipped = rules, record, []
+
+    def opens(self, name):
+        """Are this archive's members decided? For what the rules call an archive, or a name
+        without an extension — the laptop downloader's test. A signed `.edoc` is one
+        document in its envelope, not a folder, and is unpacked whole as before."""
+        return self.rules.is_archive(name) or not selection.extension(name)
+
+    def keep(self, member, archive, label):
+        parts = [p for p in member.replace("\\", "/").split("/") if p]
+        kind = self.rules.kind_of(parts[-1], folders=parts[:-1], archive=archive,
+                                  record_title=self.record.get("title"),
+                                  type_title=self.record.get("type_title"))
+        decision, reason = self.rules.decide(kind, self.record.get("section", "actual"))
+        if decision == selection.DOWNLOAD:
+            return True
+        self.skipped.append({"what": "member", "section": self.record.get("section"),
+                             "record_id": self.record.get("id"),
+                             "record_title": self.record.get("title"),
+                             "type_title": self.record.get("type_title"),
+                             "name": parts[-1], "archive": label, "member": member,
+                             "kind": kind, "reason": reason})
+        return False
+
+
+def convert(path, out_root, rel_stem, budget, depth=0, sorting=None, name=None, label=None):
+    """One file to Markdown, recursing into archives. Returns manifest entries.
+
+    `sorting` carries the document rules for the record this file belongs to; `name` is the
+    file's own name as the buyer gave it and `label` the chain of archives it sits in, both
+    only for deciding and naming skipped members."""
     kind = sniff(path)
     stem = slug(os.path.splitext(os.path.basename(path))[0])
     doc_dir = os.path.join(out_root, rel_stem)
@@ -797,9 +907,17 @@ def convert(path, out_root, rel_stem, budget, depth=0):
         # A hash also keeps the path short, which matters when unpacking deep trees.
         inner = os.path.join(out_root, "_unpacked",
                              hashlib.sha1(rel_stem.encode("utf-8")).hexdigest()[:16])
+        own = name or os.path.basename(path)
+        where = label or own
+        keep, mark = None, len(sorting.skipped) if sorting is not None else 0
+        if sorting is not None and sorting.opens(own):
+            keep = lambda member: sorting.keep(member, own, where)
         try:
-            unpack(path, inner, kind, budget)
+            if unpack(path, inner, kind, budget, keep) is False:
+                del sorting.skipped[mark:]      # every member came out: none was skipped
         except Exception as exc:
+            if sorting is not None:
+                del sorting.skipped[mark:]      # an archive not unpacked skipped nothing
             return unreadable(rel_stem, path, "archive not unpacked: %s" % str(exc)[:120])
         out = []
         # dirs.sort() pins the walk order: os.walk otherwise follows filesystem order,
@@ -813,7 +931,8 @@ def convert(path, out_root, rel_stem, budget, depth=0):
                 if is_container_part(member):
                     out.extend(packaging(child_rel, child))
                     continue
-                out.extend(convert(child, out_root, child_rel, budget, depth + 1))
+                out.extend(convert(child, out_root, child_rel, budget, depth + 1,
+                                   sorting=sorting, label="%s/%s" % (where, member)))
         return out
 
     # Word is the only format that hides structure outside the text, so it is the only one that
@@ -895,7 +1014,11 @@ def main(argv=None):
         manifest = json.load(fh)
     os.makedirs(out, exist_ok=True)
     budget = [MAX_EXPANDED]
-    entries, converted = [], {}
+    entries, converted, skipped = [], {}, []
+    # The rules the fetch ran under, if it ran under any. Absent means every member of every
+    # archive is extracted, as it always was.
+    rules_path = os.path.join(src, "document_rules.json")
+    rules = selection.Rules.load(rules_path) if os.path.exists(rules_path) else None
 
     for record in manifest["documents"]:
         for f in record["files"]:
@@ -911,13 +1034,19 @@ def main(argv=None):
                 continue
             rel = os.path.join(record["section"], slug(os.path.splitext(f["filename"])[0]))
             produced = []
-            for entry in convert(path, out, rel.replace("\\", "/"), budget):
+            sorting = Sorting(rules, record) if rules is not None else None
+            for entry in convert(path, out, rel.replace("\\", "/"), budget, sorting=sorting,
+                                 name=f.get("original_name") or f["filename"]):
                 entry.update({"record_id": record["id"], "record_title": record["title"],
                               "section": record["section"], "original_file": f["filename"],
                               "original_sha256": f["sha256"]})
                 produced.append(entry)
                 entries.append(entry)
             converted[path] = produced
+            if sorting is not None and sorting.skipped:
+                skipped.extend(sorting.skipped)
+                print("  %-58s %d archive member(s) skipped by the document rules"
+                      % (f["filename"][:58], len(sorting.skipped)), flush=True)
 
             # One line said only "unsupported", and the reason lived in a manifest inside a
             # 465 MB artifact — so diagnosing a silently unread document meant downloading
@@ -979,6 +1108,9 @@ def main(argv=None):
            "seconds": round(elapsed, 1),
            "images_extracted": WITH_IMAGES,
            "unreadable_files": gaps,
+           # Archive members the document rules did not extract, each with its kind and
+           # reason. Not a gap: the file was decided, not lost, and the reader can see it.
+           "skipped": skipped,
            "documents": entries}
     with open(os.path.join(out, "manifest_normalized.json"), "w", encoding="utf-8") as fh:
         json.dump(doc, fh, ensure_ascii=False, indent=2)

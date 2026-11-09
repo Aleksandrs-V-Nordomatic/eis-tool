@@ -615,7 +615,24 @@ def index_entry(pid, pack, manifest):
             {"file": g.get("file"), "reason": g.get("reason")}
             for g in (manifest or {}).get("unreadable_files", [])
         ],
+        # What the document rules chose not to read: records of the archive section, files
+        # of a record, members of an archive — each with its kind and the reason, so the
+        # judge knows what it was not shown. Empty when nothing was skipped or no rules ran.
+        "skipped": skipped_list(downloaded, manifest),
     }
+
+
+def skipped_list(downloaded, normalized):
+    """Everything skipped, from the fetch's manifest and the extractor's, in one list."""
+    out = []
+    for s in ((downloaded or {}).get("skipped") or []) + ((normalized or {}).get("skipped") or []):
+        item = {"what": s.get("what"), "name": s.get("name"), "kind": s.get("kind"),
+                "reason": s.get("reason"), "section": s.get("section"),
+                "record": s.get("record_title")}
+        if s.get("member"):
+            item.update(archive=s.get("archive"), member=s.get("member"))
+        out.append(item)
+    return out
 
 
 def main(argv=None):

@@ -19,6 +19,13 @@ mandatory everywhere and is NOT the null copy nested inside `DocumentTitle`.
 PARTIAL SUCCESS IS FAILURE. If any expected record or file is missing, this exits non-zero
 and writes nothing to the success path. A tender that looks downloaded but is not is worse
 than one that plainly failed, because only the second gets fixed.
+
+WHICH DOCUMENTS ARE TAKEN is decided by the document rules when the caller passes them
+(`selection.py`, the rules file in the library's kit): records of the archive section are not
+downloaded, and every file of an actual record is given a kind and downloaded only when that
+kind is read. "Missing" above means a KEPT file that did not arrive; a skipped one is never
+fetched, and its name, kind and reason are written to the manifest's `skipped` list so the
+reader can see what was not read. Without rules every file of every record is taken.
 """
 
 import argparse
@@ -35,6 +42,7 @@ import zipfile
 from urllib.parse import urlencode, urlparse
 
 import eis_page
+import selection
 
 BASE = "https://www.eis.gov.lv"
 ALLOWED_HOSTS = {"eis.gov.lv", "www.eis.gov.lv"}
@@ -235,6 +243,38 @@ def describe(record, section):
     }
 
 
+# ------------------------------------------------------------------------- document rules
+# The rules this pack was fetched under, written into the pack so `normalize` decides the
+# members of a downloaded archive by the same file, not by a second copy that could drift.
+RULES_FILE = "document_rules.json"
+
+# Keys a journal entry carries for the resume and the manifest's `skipped` list, but which
+# are not part of a record in the manifest's `documents`.
+JOURNAL_ONLY = ("skipped", "rules")
+
+
+def rules_digest(data):
+    """A short, stable name for one rules file, so a resume can tell the rules changed."""
+    blob = json.dumps(data, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(blob).hexdigest()
+
+
+def skipped_entry(record, what, name, kind, reason, archive=None, member=None):
+    """One thing that was not downloaded or not extracted, in the shape every list uses.
+
+    `what` is record, file or member. A skipped record also carries its publish date and
+    type code, because a record is still a record on the page: the change detector keeps
+    noticing it arrive even though nothing of it is read.
+    """
+    entry = {"what": what, "section": record["section"], "record_id": record["id"],
+             "record_title": record["title"], "type_title": record.get("type_title"),
+             "name": name, "archive": archive, "member": member,
+             "kind": kind, "reason": reason}
+    if what == "record":
+        entry.update(type_code=record.get("type_code"), publish_date=record.get("publish_date"))
+    return entry
+
+
 # ------------------------------------------------------------------------------- fs safety
 def sha256_file(path, chunk=1024 * 1024):
     h = hashlib.sha256()
@@ -350,12 +390,16 @@ def still_on_disk(out_dir, entry):
     directory, and re-hashing a 486 MB tender on every resume would tax the common case to
     describe the rare one. `verify.py` re-hashes the archive at the end regardless, so a
     corrupted file cannot reach the success path unnoticed.
+
+    A record whose every file the document rules skipped has nothing on disk by design; it
+    is finished when the journal names what was skipped, never on an empty list alone.
     """
-    for f in entry.get("files") or []:
+    files = entry.get("files") or []
+    for f in files:
         path = os.path.join(out_dir, f["path"])
         if not os.path.exists(path) or os.path.getsize(path) != f.get("size"):
             return False
-    return bool(entry.get("files"))
+    return bool(files) or bool(entry.get("skipped"))
 
 
 # --------------------------------------------------------------------------- download path
@@ -417,15 +461,31 @@ def download_file(curl, pid, record, fil, workdir):
     return dest
 
 
-def unpack_record_zip(path, dest_dir, record, seen, workdir):
-    """Every member of a record archive, on disk, with traversal refused."""
+def unpack_record_zip(path, dest_dir, record, seen, workdir, rules=None, skipped=None):
+    """Every member of a record archive, on disk, with traversal refused.
+
+    With `rules`, each member is decided like a file of the record and a skipped one is not
+    extracted: its entry goes to `skipped` instead. That is the route for a record whose
+    files could not be listed, where the archive is the only way to see them.
+    """
     out = []
+    label = "record_%s.zip" % record["id"]
     with zipfile.ZipFile(path) as z:
         for member in z.namelist():
             if member.endswith("/"):
                 continue
             if not safe_member(member):
                 raise Fail("unsafe path in record %s archive: %r" % (record["id"], member))
+            if rules is not None:
+                parts = member.replace("\\", "/").split("/")
+                kind = rules.kind_of(parts[-1], folders=parts[:-1], archive=label,
+                                     record_title=record["title"],
+                                     type_title=record.get("type_title"))
+                decision, reason = rules.decide(kind, record["section"])
+                if decision != selection.DOWNLOAD:
+                    skipped.append(skipped_entry(record, "member", parts[-1], kind, reason,
+                                                 archive=label, member=member))
+                    continue
             tmp = os.path.join(workdir, "x_%s" % hashlib.sha1(member.encode()).hexdigest()[:12])
             with z.open(member) as src, open(tmp, "wb") as dst:
                 shutil.copyfileobj(src, dst)
@@ -437,12 +497,106 @@ def unpack_record_zip(path, dest_dir, record, seen, workdir):
     return out
 
 
+def take_files(curl, pid, record, listed, dest_dir, seen, workdir):
+    """Download the named files of one record, one request each, into place."""
+    files = []
+    for fil in listed:
+        tmp = download_file(curl, pid, record, fil, workdir)
+        name = fil["name"] or ("file_%s" % fil["file_id"])
+        target, digest, dup = place(tmp, dest_dir, name, seen)
+        files.append({"filename": os.path.basename(target), "original_name": name,
+                      "path": target, "size": os.path.getsize(target),
+                      "sha256": digest, "duplicate": dup,
+                      "file_id": fil["file_id"]})
+    return files
+
+
+def take_record(curl, pid, record, token, dest_dir, seen, workdir):
+    """Every file of one record: the record archive first, its file list as the fallback.
+
+    The route used when no document rules were given. Returns (files, method).
+    """
+    zip_path = record_zip(curl, pid, record, workdir)
+    if zip_path:
+        files = unpack_record_zip(zip_path, dest_dir, record, seen, workdir)
+        for f in files:
+            f["file_id"] = None
+        return files, "record_zip"
+    listed = list_files(curl, pid, record, token)
+    return take_files(curl, pid, record, listed, dest_dir, seen, workdir), "individual_files"
+
+
+def take_kept(curl, pid, record, token, dest_dir, seen, workdir, rules):
+    """The kept files of one actual record. Returns (files, method, skipped).
+
+    WHY THE LIST COMES FIRST HERE. The point of the rules is not fetching what is not read —
+    a photo archive can run to gigabytes — and only the file list says what a record holds
+    before its bytes are paid for. So the list is asked for first (one request), each file
+    is decided, and then:
+
+      * every file kept   the record archive: one request however many files, as before
+      * some kept         each kept file on its own, so a skipped one is never downloaded
+      * none kept         nothing more is asked
+      * no list           the record archive, with each member decided and skipped ones
+                          left unextracted — the laptop downloader's answer to the same gap
+
+    A kept file that does not arrive still fails the tender: partial success is failure.
+    """
+    skipped = []
+    try:
+        listed = list_files(curl, pid, record, token)
+    except Fail as exc:
+        print("  record %s: files not listed (%s), taking the record archive"
+              % (record["id"], str(exc)[:80]), flush=True)
+        zip_path = record_zip(curl, pid, record, workdir)
+        if not zip_path:
+            raise Fail("record %s: files could not be listed (%s) and EIS gave no record "
+                       "archive either" % (record["id"], str(exc)[:120]))
+        files = unpack_record_zip(zip_path, dest_dir, record, seen, workdir,
+                                  rules=rules, skipped=skipped)
+        for f in files:
+            f["file_id"] = None
+        return files, "record_zip", skipped
+
+    kept = []
+    for fil in listed:
+        name = fil["name"] or ("file_%s" % fil["file_id"])
+        kind = rules.kind_of(name, record_title=record["title"],
+                             type_title=record.get("type_title"))
+        decision, reason = rules.decide(kind, record["section"])
+        if decision == selection.DOWNLOAD:
+            kept.append(fil)
+        else:
+            skipped.append(skipped_entry(record, "file", name, kind, reason))
+    if not kept:
+        return [], "none", skipped
+    if len(kept) == len(listed):
+        zip_path = record_zip(curl, pid, record, workdir)
+        if zip_path:
+            files = unpack_record_zip(zip_path, dest_dir, record, seen, workdir)
+            for f in files:
+                f["file_id"] = None
+            return files, "record_zip", skipped
+    return take_files(curl, pid, record, kept, dest_dir, seen, workdir), \
+        "individual_files", skipped
+
+
 # ------------------------------------------------------------------------------------ main
-def fetch(url, out_dir, sections=None, register_uuid=None):
+def fetch(url, out_dir, sections=None, register_uuid=None, rules=None):
+    """Download one procurement. `rules` is the document rules file as a dict, or None to
+    take every file of every record."""
     page_url, pid = canonical_url(url)
     out_dir = os.path.abspath(out_dir)
     docs_dir = os.path.join(out_dir, "documents")
     os.makedirs(docs_dir, exist_ok=True)
+    sorter = selection.Rules.load(rules) if rules is not None else None
+    stamp = rules_digest(rules) if rules is not None else None
+    rules_copy = os.path.join(out_dir, RULES_FILE)
+    if rules is not None:
+        with open(rules_copy, "w", encoding="utf-8") as fh:
+            json.dump(rules, fh, ensure_ascii=False, indent=2)
+    elif os.path.exists(rules_copy):
+        os.remove(rules_copy)          # a copy left by an earlier run must not decide this one
     workdir = tempfile.mkdtemp(prefix="eis_")
     curl = Curl(workdir, page_url)
 
@@ -509,9 +663,17 @@ def fetch(url, out_dir, sections=None, register_uuid=None):
               % (procurement.get("ref") or pid, procurement.get("buyer") or "unknown buyer",
                  procurement.get("deadline") or "not stated"), flush=True)
 
-    records, withheld = [], []
+    records, withheld, skipped_records = [], [], []
     for section, var in (sections or SECTIONS):
         for raw in embedded_array(html, var):
+            if sorter is not None and section != "actual":
+                # What the archive section holds was replaced by a record that governs, and
+                # the rules do not read it. No request is made for it; its title stays.
+                rec = describe(raw, section)
+                kind = sorter.kind_of(rec["title"], type_title=rec.get("type_title"))
+                _, reason = sorter.decide(kind, section)
+                skipped_records.append(skipped_entry(rec, "record", rec["title"], kind, reason))
+                continue
             if downloadable(raw):
                 records.append(describe(raw, section))
             else:
@@ -535,8 +697,9 @@ def fetch(url, out_dir, sections=None, register_uuid=None):
     for record in records:
         # A record an earlier run finished is not fetched again — that is the whole point of
         # the journal. It is re-fetched if the files it claims are gone or the wrong size.
+        # Only under the same rules: a record finished under other rules kept other files.
         prior = done.get(record["id"])
-        if prior and still_on_disk(out_dir, prior):
+        if prior and prior.get("rules") == stamp and still_on_disk(out_dir, prior):
             manifest.append(prior)
             print("  record %-9s %-16s %2d file(s)  %s"
                   % (record["id"], "resumed", len(prior["files"]), record["title"][:48]),
@@ -554,41 +717,45 @@ def fetch(url, out_dir, sections=None, register_uuid=None):
             time.sleep(pause_for(last_bytes))
         fetched += 1
         dest_dir = os.path.join(docs_dir, record["section"])
-        zip_path = record_zip(curl, pid, record, workdir)
-        if zip_path:
-            files = unpack_record_zip(zip_path, dest_dir, record, seen, workdir)
-            method = "record_zip"
-            for f in files:
-                f["file_id"] = None
+        if sorter is None:
+            files, method = take_record(curl, pid, record, token, dest_dir, seen, workdir)
+            skipped = []
         else:
-            files = []
-            for fil in list_files(curl, pid, record, token):
-                tmp = download_file(curl, pid, record, fil, workdir)
-                name = fil["name"] or ("file_%s" % fil["file_id"])
-                target, digest, dup = place(tmp, dest_dir, name, seen)
-                files.append({"filename": os.path.basename(target), "original_name": name,
-                              "path": target, "size": os.path.getsize(target),
-                              "sha256": digest, "duplicate": dup,
-                              "file_id": fil["file_id"]})
-            method = "individual_files"
-        if not files:
+            files, method, skipped = take_kept(curl, pid, record, token, dest_dir, seen,
+                                               workdir, sorter)
+        if not files and not skipped:
             raise Fail("record %s produced no files by either route" % record["id"])
         entry = dict(record, download_method=method, files=[
-            dict(f, path=os.path.relpath(f["path"], out_dir).replace("\\", "/")) for f in files])
+            dict(f, path=os.path.relpath(f["path"], out_dir).replace("\\", "/")) for f in files],
+            skipped=skipped, rules=stamp)
         manifest.append(entry)
         append_journal(out_dir, entry)
         last_bytes = sum(f["size"] for f in entry["files"])
-        print("  record %-9s %-16s %2d file(s)  %s"
-              % (record["id"], method, len(files), record["title"][:48]), flush=True)
+        print("  record %-9s %-16s %2d file(s)%s  %s"
+              % (record["id"], method, len(files),
+                 (", %d skipped" % len(skipped)) if skipped else "", record["title"][:48]),
+              flush=True)
 
     shutil.rmtree(workdir, ignore_errors=True)
 
+    # EVERYTHING NOT READ, IN ONE LIST. Records of the archive section, files of an actual
+    # record, and members of a record archive the rules skipped, each with its kind and the
+    # reason — so a reader judging the tender can see what it was not shown.
+    skipped_all = skipped_records + [s for r in manifest for s in r.get("skipped") or []]
+    if skipped_all:
+        print("  document rules: %d record(s) and %d file(s) not downloaded — listed as skipped"
+              % (len(skipped_records), len(skipped_all) - len(skipped_records)), flush=True)
+    documents = [{k: v for k, v in r.items() if k not in JOURNAL_ONLY} for r in manifest]
     total_files = sum(len(r["files"]) for r in manifest)
     manifest_doc = {"schema": 2, "procurement_id": pid, "source_url": page_url,
                     "records": len(manifest), "files": total_files,
-                    "records_on_page": len(manifest) + len(withheld),
+                    "records_on_page": len(manifest) + len(withheld) + len(skipped_records),
                     "sections": [name for name, _ in (sections or SECTIONS)],
-                    "withheld_records": withheld, "documents": manifest}
+                    "withheld_records": withheld, "documents": documents,
+                    # None when the run had no rules, so "nothing skipped" and "nothing
+                    # decided" cannot be confused.
+                    "document_rules": {"sha256": stamp} if stamp else None,
+                    "skipped": skipped_all}
     with open(os.path.join(out_dir, "manifest.json"), "w", encoding="utf-8") as fh:
         json.dump(manifest_doc, fh, ensure_ascii=False, indent=2)
 
@@ -623,10 +790,17 @@ def main(argv=None):
     ap.add_argument("--skip-archive", action="store_true",
                     help="take only the governing documents, not the superseded ones "
                          "(a small share of the bytes, a large share of the files)")
+    ap.add_argument("--rules", help="a document rules file; without it every file is taken")
     args = ap.parse_args(argv)
     sections = SECTIONS[:1] if args.skip_archive else SECTIONS
+    rules = None
+    if args.rules:
+        with open(args.rules, encoding="utf-8-sig") as fh:
+            rules = json.load(fh)
+    else:
+        print("no document rules given: every file of every record is downloaded", flush=True)
     try:
-        s = fetch(args.url, args.out, sections)
+        s = fetch(args.url, args.out, sections, rules=rules)
     except Fail as exc:
         print("FAIL: %s" % exc, file=sys.stderr)
         return 2

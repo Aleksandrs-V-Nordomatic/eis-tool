@@ -146,6 +146,16 @@ jobs:
           # repository's. Unset means no filter, and a discovery run then fetches every
           # notice it finds — the safe direction, and a loud one.
           EIS_POLICY: ${{ secrets.EIS_POLICY }}
+          # WHICH DOCUMENTS OF A TENDER ARE TAKEN comes from the library: batch.py reads
+          # kit/<country>/document_rules.json beside GRAPH_DEST_ROOT's work folder, with the
+          # same credential the delivery uses. Configured and unreadable stops the shard;
+          # not configured at all (a fork) takes every file and says so in the log.
+          GRAPH_TENANT_ID: ${{ secrets.GRAPH_TENANT_ID }}
+          GRAPH_CLIENT_ID: ${{ secrets.GRAPH_CLIENT_ID }}
+          GRAPH_CLIENT_SECRET: ${{ secrets.GRAPH_CLIENT_SECRET }}
+          GRAPH_DRIVE_ID: ${{ secrets.GRAPH_DRIVE_ID }}
+          GRAPH_DEST_ROOT: ${{ secrets.GRAPH_DEST_ROOT }}
+          EIS_COUNTRY: ${{ inputs.country }}
         run: |
           mkdir -p packs
           cat > targets.txt <<'TARGETS'

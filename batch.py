@@ -47,9 +47,11 @@ import traceback
 
 from console import say, utf8_streams
 
+import country
 import eis_fetch
 import eis_tool
 import net
+import selection
 
 
 # WHAT A TENDER WILL WEIGH, GUESSED FROM WHAT THE REGISTER ALREADY SAYS.
@@ -258,6 +260,75 @@ def targets_from(path=None, days=None, date_from=None, date_to=None, no_gate=Fal
     return targets, weights, uuids
 
 
+# WHICH DOCUMENTS OF A TENDER ARE TAKEN is the library's decision, not this repository's. The
+# rules file lives in the project's kit, beside the `work/` folder the delivery writes to:
+#
+#     <project>/work/<CC>/...                    GRAPH_DEST_ROOT names <project>/work
+#     <project>/kit/<CC>/document_rules.json     read here, at the start of every shard
+#
+# One source, read over the same Graph credential the delivery holds, so a change to the
+# rules reaches the next run without a commit here.
+RULES_NAME = "document_rules.json"
+
+
+class RulesMissing(RuntimeError):
+    """The document rules should have been read and could not be."""
+
+
+def rules_path(dest_root, code):
+    """The kit's rules file for this country, as a drive path, derived from GRAPH_DEST_ROOT."""
+    work = country.destination(dest_root, code).rsplit("/", 1)[0]   # also refuses a bad root
+    project = work.rsplit("/", 1)[0] if "/" in work else ""
+    return "/".join(p for p in (project, "kit", code, RULES_NAME) if p)
+
+
+def parse_rules(text, where):
+    """The rules as a dict, or RulesMissing naming what is wrong with them."""
+    if not (text or "").strip():
+        raise RulesMissing("%s is missing or empty" % where)
+    try:
+        data = json.loads(text.lstrip("\ufeff"))
+        if not isinstance(data, dict):
+            raise ValueError("not a JSON object")
+        selection.Rules.load(data)           # every pattern compiles, every key is there
+    except Exception as exc:
+        raise RulesMissing("%s cannot be read: %s" % (where, str(exc)[:160]))
+    return data
+
+
+def load_rules(path=None, environ=None):
+    """(rules as a dict, where they came from), or (None, None) when there are none to read.
+
+    A local `path` is for tests and local runs. Without one the rules come off the library
+    over Graph, and when Graph is configured a missing or unreadable file stops the shard:
+    quietly downloading every document instead would undo the rules on exactly the day
+    nobody notices. With no Graph at all — a fork, a laptop — there is nothing to read, and
+    the run takes every file as it always did; the caller says so in the log.
+    """
+    environ = os.environ if environ is None else environ
+    if path:
+        try:
+            with open(path, encoding="utf-8-sig") as fh:
+                text = fh.read()
+        except OSError as exc:
+            raise RulesMissing("%s cannot be opened: %s" % (path, exc))
+        return parse_rules(text, path), path
+    drive = (environ.get("GRAPH_DRIVE_ID") or "").strip()
+    root = (environ.get("GRAPH_DEST_ROOT") or "").strip()
+    if not drive and not root:
+        return None, None
+    if not (drive and root):
+        raise RulesMissing("Graph is half configured (GRAPH_DRIVE_ID and GRAPH_DEST_ROOT go "
+                           "together), so the document rules cannot be read")
+    code = country.resolve(None, environ)
+    import deliver_graph
+    # Named by its place in the kit, never by the full drive path: the run log does not say
+    # where the library is.
+    where = "kit/%s/%s" % (code, RULES_NAME)
+    text = deliver_graph.text_at(drive, rules_path(root, code), deliver_graph.graph_token())
+    return parse_rules(text, where), where
+
+
 def as_url(target):
     """Accept an EIS URL, a bare procurement id, or an IUB notice uuid.
 
@@ -337,8 +408,10 @@ def write_accounts(out, day_targets, failed, withdrawn):
     return body
 
 
-def run(targets, out, llm_max_files=None, workers=1, sections=None, uuids=None):
-    """Download in order, post-process behind it. Returns (done, failed)."""
+def run(targets, out, llm_max_files=None, workers=1, sections=None, uuids=None, rules=None):
+    """Download in order, post-process behind it. Returns (done, failed).
+
+    `rules` is the document rules file as a dict; None takes every file of every record."""
     out = os.path.abspath(out)
     os.makedirs(out, exist_ok=True)
     work = queue_mod.Queue()
@@ -401,8 +474,11 @@ def run(targets, out, llm_max_files=None, workers=1, sections=None, uuids=None):
             # `target` is the key, not `url`: they differ when the caller named an IUB
             # notice and `as_url` resolved it, and the uuid map is keyed by what discovery
             # produced.
+            # `rules` only when there are some, so a run without them makes exactly the call
+            # it always made.
             eis_fetch.fetch(url, pack, sections,
-                            register_uuid=(uuids or {}).get(target) or (uuids or {}).get(url))
+                            register_uuid=(uuids or {}).get(target) or (uuids or {}).get(url),
+                            **({"rules": rules} if rules is not None else {}))
         except eis_fetch.Withdrawn as exc:
             # Caught ahead of the plain `Fail` it subclasses: this id is settled, not
             # outstanding, so it is recorded apart and never repeated back as a gap.
@@ -461,10 +537,26 @@ def main(argv=None):
                     help="take only the governing documents, not superseded ones")
     ap.add_argument("--no-policy-gate", "--no-cpv-gate", dest="no_gate", action="store_true",
                     help="ignore EIS_POLICY and fetch every discovered notice")
+    ap.add_argument("--rules", help="read the document rules from this file instead of the "
+                                    "library's kit")
     args = ap.parse_args(argv)
 
     if not args.targets and args.days is None and not (args.date_from or args.date_to):
         ap.error("give --targets, or --days/--from to discover, or both")
+    # The rules first, before anything is asked of the register or EIS: a shard that cannot
+    # read them stops in a second instead of after a day of downloads it would have to undo.
+    try:
+        rules, origin = load_rules(args.rules)
+    except (RulesMissing, country.Mismatch) as exc:
+        print("document rules: %s - the shard stops rather than download every document"
+              % exc, file=sys.stderr)
+        return 2
+    if rules is None:
+        say("document rules: none - Graph is not configured and no --rules was given, so "
+            "every file of every record is downloaded")
+    else:
+        say("document rules: %s - kinds not read: %s; the archive section is not downloaded"
+            % (origin, ", ".join(sorted(rules.get("skip") or [])) or "none"))
     try:
         targets, weights, uuids = targets_from(args.targets, args.days, args.date_from,
                                                args.date_to, args.no_gate)
@@ -491,7 +583,7 @@ def main(argv=None):
         say("batch of %d target(s)" % len(targets))
     sections = eis_fetch.SECTIONS[:1] if args.skip_archive else None
     done, failed, withdrawn = run(targets, args.out, args.llm_max_files, sections=sections,
-                                  uuids=uuids)
+                                  uuids=uuids, rules=rules)
     # The WHOLE day's targets, not this shard's slice — `whole_list` is the list before it
     # was split, which is exactly what a reader needs to tell a short day from a full one.
     write_accounts(args.out, whole_list, failed, withdrawn)

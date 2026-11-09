@@ -1,8 +1,8 @@
 # eis-tool
 
-Downloads every public document of a Latvian EIS procurement and turns it into text.
-Deterministically, with no model in the main path, and with every file it could not read
-named rather than quietly missing.
+Downloads the public documents of a Latvian EIS procurement and turns them into text.
+Deterministically, with no model in the main path, and with every file it skipped or could
+not read named rather than quietly missing.
 
 **Proprietary. No licence is granted — see [LICENSE](LICENSE).** Issues and pull requests
 are closed and unreviewed.
@@ -49,6 +49,22 @@ created and publishes whenever the buyer is ready, so the space below the newest
 filling in. Measured over 72 published procurements, the gap between a notice's own id and the highest
 id published by that date was 77 at the median, 1 760 at the ninth decile, and 9 972 once.
 
+## Which documents are downloaded
+
+The library's document rules decide, not this repository: `kit/<CC>/document_rules.json`
+in the project folder, beside the `work/` folder the delivery writes to. A shard reads it
+over Graph before it fetches anything, and stops if Graph is configured but the file is
+missing or unreadable. Without Graph (a fork, a local run) there are no rules, every file of
+every record is downloaded, and the log says so; `--rules <file>` gives a local copy.
+
+Under the rules, records of the archive section ("Dokumenti (arhīvs)") are not downloaded:
+they hold replaced versions. Every file of an actual record gets a kind from its name, the
+record title and the EIS document type (`selection.py`), and kinds the rules do not read —
+drawings, photos, CAD files, bid forms, datasheets — are not downloaded. Inside a downloaded
+archive each member is decided the same way and a skipped one is not extracted. Nothing is
+dropped silently: every skipped record, file and member is listed with its kind and reason
+under `skipped` in the tender's manifests and in its published `index.json`.
+
 ## Use
 
 ```bash
@@ -88,7 +104,8 @@ pack/
   procurement.json    the tender's own facts, read off its page — except whether the
                       register carries it, which the page usually does not say and the
                       caller usually knows (`register_check`)
-  manifest.json       what was downloaded, with sha256 per file
+  manifest.json       what was downloaded, with sha256 per file, and what the document
+                      rules skipped (`skipped`)
   journal.jsonl       append-only progress — the resume point
   normalized/         one Markdown document per readable file, plus the audit list
   llm/                what the decoder could not read, read anyway — local OCR by default,
@@ -157,7 +174,7 @@ what a reader may rely on:
 ```
 tenders/<pid>/                the tender, complete, whenever each part of it arrived
   procurement.json              its facts, as above
-  manifest.json                 what was downloaded, sha256 per file
+  manifest.json                 what was downloaded, sha256 per file, and what was skipped
   doc/<digest>.md               the Markdown, one file per document, named for its source
   normalized/manifest_normalized.json
   structure.json                Word numbering, when the tender had any
