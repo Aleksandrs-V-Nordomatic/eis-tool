@@ -1,0 +1,40 @@
+name: egress-map
+
+# One question, and the answer changes the carrier decision:
+# is EIS refusing us because of what we did, or because of which address we drew?
+#
+# Eight jobs at the same moment, each on its own runner, each downloading nothing. Volume is
+# held at zero, so anything that varies between them varies by address alone.
+#
+#   all fail            -> temporal: a throttle we earned, or an outage. Pacing is the fix.
+#   some pass, some fail-> per-address: GitHub runners are a lottery for EIS. Pacing is NOT
+#                          the fix; retrying on a fresh runner is.
+#   all pass            -> whatever it was has lifted.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  draw:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    strategy:
+      fail-fast: false
+      matrix:
+        n: [1, 2, 3, 4, 5, 6, 7, 8]
+    steps:
+      - name: Draw ${{ matrix.n }}
+        run: |
+          IP=$(curl -s --max-time 15 https://api.ipify.org || echo unknown)
+          # A control on the same host: if IUB answers and EIS does not, the runner's egress
+          # is healthy and the refusal belongs to EIS.
+          IUB=$(curl -s -o /dev/null --connect-timeout 10 --max-time 25 \
+                -w '%{http_code}' https://infob.iub.gov.lv/api/classifiers || echo FAIL)
+          EIS=$(curl -s -o /dev/null --connect-timeout 20 --max-time 40 \
+                -A 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/131.0.0.0' \
+                -w '%{http_code} in %{time_total}s' \
+                https://www.eis.gov.lv/EKEIS/Supplier/Procurement/178345 || echo "REFUSED")
+          printf 'draw %s | ip %-16s | iub %s | eis %s\n' "${{ matrix.n }}" "$IP" "$IUB" "$EIS"
