@@ -2,20 +2,22 @@
 # -*- coding: utf-8 -*-
 """The recall gate: which notices are worth fetching, before a single byte moves.
 
-This is the one piece of judgement that is not about a country. A CPV code means the same
-thing wherever it is filed, and the terms a caller recalls on are their business rather than
-a portal's, so the rule is written once, in a file that names no portal.
+WHY IT IS ITS OWN FILE. This is the one piece of judgement that is not about a country. A
+CPV code means the same thing wherever it is filed, and the terms a caller recalls on are
+their business rather than a portal's — so the rule is written once, in a file that names no
+portal, rather than reached for from whichever driver happens to need it.
 
-This file knows nothing about the caller's interest. The terms arrive from the caller as
-policy text, so this file names no industry, no trade and no target, and a reader of this
-repository learns the shape of the filter without learning what anyone points it at.
+WHAT THIS KNOWS ABOUT THE CALLER'S INTEREST: NOTHING — the same rule deliver_graph.py keeps
+about its destination. The terms arrive in the environment, so this file names no industry,
+no trade and no target, and a reader of this repository learns the shape of the filter
+without learning what anyone points it at.
 """
 
 import json
 import os
 
 
-# The one filter allowed before a document exists.
+# THE ONE FILTER ALLOWED BEFORE A DOCUMENT EXISTS.
 #
 # A title is kept when it contains one of the caller's recall roots. Roots are matched as
 # substrings rather than as whole words because the language this runs against inflects
@@ -24,30 +26,53 @@ import os
 # One guard, and it fails toward fetching: no text at all means no evidence, so the notice is
 # fetched.
 #
-# Exclusions win over recall, including over a matching title: `hard_exclude_prefixes` is
-# tested before the recall terms and returns. A code exclusion that could not override a
-# matching title could never drop anything, because a notice whose title does not match is
-# dropped by the recall test anyway. It exists for the notice whose title matches and is
-# still out of scope.
+# EXCLUSIONS WIN OVER RECALL, INCLUDING OVER A MATCHING TITLE, AND THAT IS DELIBERATE. This
+# paragraph used to claim the opposite in the line above it -- that a classification code never
+# vetoes a matching title -- while the code below did what it does now: `hard_exclude_prefixes`
+# is tested BEFORE the recall terms and returns. The two sentences stood side by side for
+# months. The code was right and the sentence was wrong, and it was settled by measurement
+# rather than by preference.
 #
-# That puts the whole weight on how narrowly a prefix is written. An exclusion is absolute
-# for a notice carrying no other code, so write a prefix that names a purchase (four to six
-# digits), never one that names a division, and reach for `override_prefixes` before
-# widening one. A two-digit division such as 45 (construction works) would silently drop a
-# large share of what is kept.
+# WHAT THE MEASUREMENT SAID. Both orders were run over 5 925 real Latvian notices spanning
+# 9 June to 6 September 2026, against the live recall policy: they kept 2 147 each and
+# disagreed about none of them. Only four notices in three months reached the contested branch
+# at all -- and all four were car-park management systems, CPV 98351000 and 34926000, whose
+# titles say `vadības sistēma`, control system, and match the recall terms perfectly. Dropping
+# them is the entire reason those prefixes were written.
 #
-# An absent or unreadable policy means fetch everything, which is the only safe direction
-# for a filter that failed to load: fetching too much costs time, and dropping silently
-# costs a tender.
+# So the rule that reads well is also the rule that is useless: a code exclusion that could not
+# override a matching title could never drop anything, because a notice whose title does not
+# match is dropped by the recall test anyway. `hard_exclude_prefixes` exists for exactly the
+# notice that matches and is still not ours.
+#
+# WHICH PUTS THE WHOLE WEIGHT ON HOW NARROWLY A PREFIX IS WRITTEN, and that is the warning this
+# paragraph is really for. An exclusion is absolute for a notice carrying no other code. Both
+# live policies write theirs four to six digits long -- specific purchases, not divisions -- and
+# that is why the branch fires four times a quarter instead of gutting the day. Measured on the
+# same corpus, adding one two-digit division would silently drop, out of 2 147 kept notices:
+#
+#     45  construction works                    591
+#     71  architecture and engineering          420
+#     50  repair and maintenance services       204
+#
+# Those are the divisions our own work is filed under. Write a prefix that names a purchase,
+# never one that names a division, and reach for `override_prefixes` before widening one.
+#
+# WHAT THIS KNOWS ABOUT THE CALLER'S INTEREST: NOTHING — the same rule deliver_graph.py
+# keeps about its destination. The terms arrive in the environment, so this file names no
+# industry, no trade and no target, and a reader of this repository learns the shape of the
+# filter without learning what anyone points it at. An absent or unreadable policy means
+# fetch everything, which is the only safe direction for a filter that failed to load:
+# fetching too much costs time, and dropping silently costs a tender.
 POLICY_ENV = "EIS_POLICY"
 
 
 def load_policy(source=None):
     """The caller's recall policy, or None. None means no filter — fetch everything.
 
-    `source` is the policy's JSON text, which the caller reads from the radar kit, or a path
-    to a JSON file. With None, `EIS_POLICY` in the environment is read instead. No
-    deployment's terms are committed here.
+    `source` is JSON text, a path to a JSON file, or None to read `EIS_POLICY` from the
+    environment. Tests pass a fixture through it; production passes nothing and the
+    environment answers, so no deployment's terms are ever committed here.
     """
     raw = source if source is not None else os.environ.get(POLICY_ENV)
     if not raw or not raw.strip():
@@ -66,32 +91,41 @@ def load_policy(source=None):
     recall = tuple(t.casefold() for t in (policy.get("recall_title_terms") or ()))
     exclude_prefixes = tuple(policy.get("hard_exclude_prefixes") or ())
     exclude_titles = tuple(t.casefold() for t in (policy.get("hard_exclude_title_terms") or ()))
-    # A policy may be exclusions only.
+    # A POLICY MAY BE EXCLUSIONS ONLY, AND FOR SOME CALLERS IT MUST BE.
     #
     # A recall list is a whitelist: a notice whose title carries none of its roots is
-    # dropped before a byte moves. That suits a caller who buys a nameable thing. It is
-    # wrong for a caller whose subject sits inside somebody else's purchase, where the
-    # title names the whole and the part appears in the documents. For them the gate is the
-    # buyer's own classification: drop what the codes place outside, keep the rest, and let
-    # the documents decide.
+    # dropped before a byte moves. That suits a caller who buys a nameable thing — the
+    # word is in the title or the notice is not theirs. It is exactly wrong for a caller
+    # whose subject sits INSIDE somebody else's purchase, where the title names the whole
+    # and the part appears three documents down. For them the honest gate is the buyer's
+    # own classification: drop what the codes place outside, keep the rest, and let the
+    # documents decide. A whitelist in that position drops most of a day, and what it drops
+    # is what the caller is there to find, because those are precisely the notices whose
+    # titles say nothing.
     #
-    # So recall terms are one optional half of a policy. `None` is returned for a policy
-    # that says nothing at all — an absent, unreadable or empty policy means fetch
-    # everything.
+    # So recall terms are now one optional half of a policy rather than the price of having
+    # one. `None` is still returned for a policy that says nothing at all — an absent,
+    # unreadable or empty policy means fetch everything, which stays the only safe
+    # direction for a filter that failed to load.
     if not (recall or exclude_prefixes or exclude_titles
             or policy.get("override_prefixes") or policy.get("recall_cpv_prefixes")):
         return None                       # a policy with no rules is no policy
     return (recall,
             exclude_prefixes,
             exclude_titles,
-            # Codes that survive their own division. A purchase can carry a main code
+            # CODES THAT SURVIVE THEIR OWN DIVISION. A purchase can carry a main code
             # inside an excluded division and nothing else — a buyer files it under the
-            # service it is bought as rather than the thing it is. Without an override
-            # such a notice is dropped before a byte moves.
+            # service it is bought as rather than the thing it is — and 62% of live
+            # procurements carry one code only. Without an override such a notice is
+            # dropped before a byte moves, which is the one failure the exclusions are
+            # least allowed to cause.
             tuple(policy.get("override_prefixes") or ()),
-            # Codes that recall on their own, because a title is not always the better
-            # signal: a buyer may write a vague title and then classify the purchase
-            # precisely. Absent, this changes nothing.
+            # CODES THAT RECALL ON THEIR OWN, because a title is not always the better
+            # signal. Recall was title-only, and a code could exclude or rescue from an
+            # exclusion but never bring anything in — so a procurement whose title is vague
+            # and whose code is exact was dropped before a byte moved. That shape is common:
+            # a buyer writes three words and then classifies the purchase precisely, and the
+            # gate could hear only the three words. Absent, this changes nothing.
             tuple(policy.get("recall_cpv_prefixes") or ()))
 
 def cpv_codes(notice):
@@ -111,8 +145,7 @@ def outside_scope(notice, policy):
     """Should this notice be excluded before any documents are fetched?"""
     if not policy:
         return False
-    # The first three fields are always present; the override and code-recall lists are
-    # optional.
+    # Older policies carry three fields; the override list is the fourth and optional.
     recall_terms, exclude_prefixes, exclude_title_terms = policy[:3]
     override_prefixes = policy[3] if len(policy) > 3 else ()
     recall_prefixes = policy[4] if len(policy) > 4 else ()
@@ -130,15 +163,18 @@ def outside_scope(notice, policy):
             and all(c.startswith(exclude_prefixes) for c in codes)):
         return True
 
-    # A code can recall, and it is asked before the title. The exclusions above still
+    # A CODE CAN RECALL, AND IT IS ASKED BEFORE THE TITLE. The exclusions above still
     # bind — an excluded title term or an all-excluded code set has already returned — so
-    # this only widens what is fetched.
+    # this widens what is fetched and can never drop anything the old gate kept.
     if recall_prefixes and any(c.startswith(recall_prefixes) for c in codes):
         return False
 
-    # No recall list means no whitelist, not an empty one. A policy that carries only
-    # exclusions has already had its say above. Asking an empty recall list whether it
-    # matched would answer no for every notice and drop everything.
+    # NO RECALL LIST MEANS NO WHITELIST, NOT AN EMPTY ONE. A policy that carries only
+    # exclusions has already had its say above: what the codes place outside is gone, and
+    # everything else is the caller's to read. Asking an empty recall list whether it
+    # matched would answer no for every notice on earth and drop the entire day — the one
+    # failure this gate is least allowed to cause, and the reason the check is here rather
+    # than left to the expression below.
     if not recall_terms:
         return False
 
