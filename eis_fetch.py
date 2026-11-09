@@ -291,6 +291,25 @@ def safe_member(name):
     return not os.path.isabs(name) and ":" not in name.split("/")[0][1:2]
 
 
+# EIS names a listed file by its document title and the file in brackets, and a title may hold
+# a slash: "Tehniskā specifikācija / Projektēšanas uzdevums (P7_Tehniska specifikacija.doc)".
+# Used as it stands, that is a path into a folder that does not exist. The record zip never
+# showed it, because its members carry the bare file names; the per-file route does.
+UNSAFE_IN_NAME = re.compile(r"[/\\\x00-\x1f]+")
+NAME_BYTES = 200
+
+
+def disk_name(filename):
+    """A name one folder can hold: no separators or control characters, and short enough for
+    the file system once the hash suffix of a clash is added. The original stays in the
+    manifest as `original_name`."""
+    name = UNSAFE_IN_NAME.sub("_", filename or "").strip(" .") or "file"
+    stem, ext = os.path.splitext(name)
+    while len((stem + ext).encode("utf-8")) > NAME_BYTES and stem:
+        stem = stem[:-1]
+    return (stem + ext) or "file"
+
+
 def place(src, dest_dir, filename, seen):
     """Move a downloaded file into place, deduplicating by content.
 
@@ -298,6 +317,7 @@ def place(src, dest_dir, filename, seen):
     both survive, distinguished by a hash suffix — silently overwriting one with the other
     is how a manifest ends up describing a file that is not there.
     """
+    filename = disk_name(filename)
     digest = sha256_file(src)
     key = (filename, digest)
     if key in seen:
